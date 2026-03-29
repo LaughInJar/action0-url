@@ -1,0 +1,84 @@
+[project]
+name = "action0-url"
+dynamic = ["version"]
+authors = [
+    { name="Simon Lachinger" },
+]
+description = "Library for easily parsing and manipulating URLs"
+requires-python = ">=3.10"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.6",
+    "ty>=0.0.23",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/action0/url/__init__.py"
+pattern = "__version__: str = \"(?P<version>[^\"]+)\""
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/action0/url"]
+
+[tool.ruff]
+line-length = 99
+indent-width = 4
+target-version = "py314"
+exclude = [
+    ".git",
+    "dist",
+]
+
+[tool.ruff.lint]
+# Enable Pyflakes (`F`) and a subset of the pycodestyle (`E`)  codes by default.
+# Unlike Flake8, Ruff doesn't enable pycodestyle warnings (`W`) or
+# McCabe complexity (`C901`) by default.
+select = ["F", "I", "W", "E4", "E7", "E9"]
+ignore = []
+
+# Allow fix for all enabled rules (when `--fix`) is provided.
+fixable = ["ALL"]
+unfixable = []
+
+# Allow unused variables when underscore-prefixed.
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.isort]
+force-single-line = true
+combine-as-imports = false
+known-first-party = ["action0"]
+
+[tool.ruff.format]
+# Like Black, use double quotes for strings.
+quote-style = "double"
+
+# Like Black, indent with spaces, rather than tabs.
+indent-style = "space"
+
+# Like Black, respect magic trailing commas.
+skip-magic-trailing-comma = false
+
+# Like Black, automatically detect the appropriate line ending.
+line-ending = "auto"
+
+# Enable auto-formatting of code examples in docstrings. Markdown,
+# reStructuredText code/literal blocks and doctests are all supported.
+#
+# This is currently disabled by default, but it is planned for this
+# to be opt-out in the future.
+docstring-code-format = true
+
+# Set the line length limit used when formatting code snippets in
+# docstrings.
+#
+# This only has an effect when the `docstring-code-format` setting is
+# enabled.
+docstring-code-line-length = 99
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
