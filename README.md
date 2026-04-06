@@ -52,6 +52,7 @@ print(url)
 
  1. Tests
  2. GH-Actions (run linter & test matrix for versions 3.10+) 
+ 3. Build & publish
 
 ## About action0
 
