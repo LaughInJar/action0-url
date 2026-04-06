@@ -97,14 +97,10 @@ class Url:
             parse_result = urlparse(url, scheme="https")
         else:
             parse_result = ParseResult(
-                netloc=None,
+                netloc="",
                 path=None,
                 fragment=None,
-                username=None,
-                password=None,
                 scheme=None,
-                hostname=None,
-                port=None,
                 params=None,
                 query=None,
             )
