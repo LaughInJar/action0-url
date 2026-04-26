@@ -5,8 +5,6 @@ from typing import Literal
 from typing import Union
 from urllib.parse import parse_qs
 
-from IPython.lib.pretty import pretty
-
 ParamTypes = Union[Iterable[tuple[str, str | Iterable[str]]], dict[str, str | Iterable[str]], str]
 
 
@@ -101,15 +99,25 @@ class Params:
         self._params = {}
         return old
 
-    def as_str(self) -> str:
+    def as_str(self, sort=False) -> str:
         """
         A string representation of the parameters, url encoded.
+
+        :param sort: sort the parameters by their name and then by their value, otherwise
+                     they'll be returned in the order they've been added
         :return: the url encoded query / file parameter string, e.g.
                  "foo=bar&bar=baz&bar=abc"
         """
-        param_str = urllib.parse.urlencode(self._params, doseq=True)
+        if sort:
+            _params = sorted(self._params)
+        else:
+            _params = self._params
+
+        param_str = urllib.parse.urlencode(_params, doseq=True)
+
         if self.separator != "&":
             param_str.replace("&", self.separator)
+
         return param_str
 
     def as_tuples(self) -> Iterator[tuple[str, list[str]]]:
