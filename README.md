@@ -51,8 +51,9 @@ print(url)
 ## TODOs
 
  1. Tests
- 2. GH-Actions (run linter & test matrix for versions 3.10+) 
- 3. Build & publish
+ 2. GH-Actions (run linter & test matrix for versions 3.10+)
+ 3. Docs
+ 4. Build & publish
 
 ## About action0
 
