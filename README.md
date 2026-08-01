@@ -92,9 +92,8 @@ uv run mypy          # type-check (also: uv run pyright, uv run ty check)
 
 ## TODOs
 
- 1. GH-Actions (run linter & test matrix for versions 3.11+)
- 2. Docs
- 3. Build & publish
+ 1. Docs
+ 2. Build & publish
 
 ## About action0
 
