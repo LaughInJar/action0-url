@@ -77,7 +77,13 @@ print(url.query.as_str(sort=True))
 url.query.update({"b": 9}, token="abc")  # replaces values of existing names
 print(url.query.as_str())
 # b=9&a=3&c=4&c=x&c=5&token=abc
+url.query.sort()  # persistent, unlike as_str(sort=True)
+print(url.query.as_str())
+# a=3&b=9&c=4&c=5&c=x&token=abc
 ```
+
+Blank values are kept, so parsing and re-rendering is lossless:
+`Params("a=&b=1").as_str()` is `"a=&b=1"` again.
 
 `Params` can also be used on its own, e.g. with a `;` separator as used
 for path parameters:
@@ -121,6 +127,39 @@ print(Url("https://example.com?a=1&b=2") == Url("https://example.com?b=2&a=1"))
 print(repr(url))
 # Url(https://user:***@example.com:8443/index.html)
 ```
+
+## Paths, normalization and encoding
+
+```python
+from action0.url import Url
+
+url = Url("https://example.com/docs/guide/intro.html?lang=en")
+print(url.name, "|", url.suffix, "|", url.parent)
+# intro.html | .html | https://example.com/docs/guide?lang=en
+url.name = "outro.html"
+print(url)
+# https://example.com/docs/guide/outro.html?lang=en
+
+# RFC 3986 style normalization: casing, default ports, dot segments
+print(Url("https://example.com:443/a/./b/../c").normalize())
+# https://example.com/a/c
+
+# parts are stored decoded, rendering percent-encodes them again ...
+url = Url("https://example.com/a%20b", fragment="§ 2")
+print(url.path, "|", url)
+# /a b | https://example.com/a%20b#%C2%A7%202
+
+# ... and non-ASCII hostnames become punycode
+print(Url(scheme="https", hostname="bücher.example"))
+# https://xn--bcher-kva.example
+
+print(url.is_absolute(), Url(path="/a").is_relative())
+# True True
+```
+
+For debugging and stdlib interoperability there are also `url.as_dict()`
+(all parts as a plain dictionary) and `url.as_parse_result()` (the
+`urllib.parse.ParseResult` named tuple).
 
 ## Development
 

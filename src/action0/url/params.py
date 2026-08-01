@@ -69,7 +69,9 @@ class Params(MutableMapping[str, str]):
                        whose keys and values are copied, or as a list of tuples
                        or a dictionary. The values can be single values or lists
                        of values; non-string values are coerced to strings
-                       (bools become "true" / "false").
+                       (bools become "true" / "false"). Unlike parse_qs, blank
+                       values are kept ("a=&b=1" keeps "a"), so parsing and
+                       re-rendering is lossless.
         :param separator: either a '&' or a ';' to separate the key-value pairs
                           in the string representation (also used when copying
                           another Params instance)
@@ -83,7 +85,7 @@ class Params(MutableMapping[str, str]):
             self._params = {key: list(values) for key, values in params.as_tuples()}
 
         elif isinstance(params, str):
-            self._params = parse_qs(params, separator=self.separator)
+            self._params = parse_qs(params, separator=self.separator, keep_blank_values=True)
 
         elif isinstance(params, Mapping):
             # cast: the type checker cannot fully rule out the Iterable-of-tuples
@@ -249,6 +251,14 @@ class Params(MutableMapping[str, str]):
         old = self._params
         self._params = {}
         return old
+
+    def sort(self) -> None:
+        """
+        Sort the parameters in place by their name and then each name's
+        values — the persistent equivalent of ``as_str(sort=True)``, which
+        only sorts the rendered output.
+        """
+        self._params = {key: sorted(values) for key, values in sorted(self._params.items())}
 
     def as_str(self, sort: bool = False) -> str:
         """

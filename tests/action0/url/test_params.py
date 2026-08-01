@@ -668,5 +668,45 @@ class ParamsEqualityTestCase(unittest.TestCase):
         self.assertNotEqual(Params("a=1"), 42)
 
 
+class ParamsBlankValuesTestCase(unittest.TestCase):
+    """
+    tests for the handling of blank parameter values
+    """
+
+    def test_blank_values_kept(self) -> None:
+        """
+        Test that blank values survive a parse/render round trip
+        (regression: parse_qs drops them by default).
+        """
+        params = Params("a=&b=1")
+        self.assertEqual(params.as_dict(), {"a": [""], "b": ["1"]})
+        self.assertEqual(params.as_str(), "a=&b=1")
+
+    def test_blank_value_access(self) -> None:
+        """
+        Test that a blank value behaves like any other value.
+        """
+        params = Params("a=")
+        self.assertEqual(params["a"], "")
+        self.assertEqual(params.get_all("a"), [""])
+        self.assertIn("a", params)
+
+
+class ParamsSortTestCase(unittest.TestCase):
+    """
+    tests for :py:meth:`action0.url.params.Params.sort`
+    """
+
+    def test_sort_in_place(self) -> None:
+        """
+        Test that sort() persistently orders by name, then by values.
+        """
+        params = Params("b=2&a=3&a=1")
+        params.sort()
+        self.assertEqual(params.as_str(), "a=1&a=3&b=2")
+        self.assertEqual(list(params), ["a", "b"])
+        self.assertEqual(params.get_all("a"), ["1", "3"])
+
+
 if __name__ == "__main__":
     unittest.main()

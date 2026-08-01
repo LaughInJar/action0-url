@@ -1,6 +1,8 @@
 import logging
 from typing import Any
 from urllib.parse import ParseResult
+from urllib.parse import quote
+from urllib.parse import unquote
 from urllib.parse import urljoin
 from urllib.parse import urlparse
 from urllib.parse import urlunparse
@@ -9,6 +11,16 @@ from action0.url.params import Params
 from action0.url.params import ParamTypes
 
 log = logging.getLogger(__name__)
+
+# the default ports normalize() removes for the respective scheme
+_DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443, "ftp": 21}
+
+# characters that stay raw when percent-encoding a part (on top of quote()'s
+# always-safe unreserved characters): RFC 3986 pchar minus the delimiters
+# that would change how the URL is parsed back
+_PATH_SAFE = "/:@!$&'()*+,="  # no ";", it starts the path params
+_FRAGMENT_SAFE = "/?:@!$&'()*+,;="
+_USERINFO_SAFE = "!$&'()*+,;="  # no ":", it separates username and password
 
 
 def _split_authority(authority: str) -> tuple[str | None, int | None]:
@@ -24,6 +36,61 @@ def _split_authority(authority: str) -> tuple[str | None, int | None]:
     if sep and port_part.isdigit():
         return host_part, int(port_part)
     return authority or None, None
+
+
+def _encode_hostname(hostname: str) -> str:
+    """
+    IDNA-encode (punycode) a hostname if it contains non-ASCII characters.
+
+    :param hostname: the hostname to encode
+    :return: the ASCII representation of the hostname
+    :raises UnicodeError: if the hostname cannot be IDNA-encoded
+    """
+    if hostname.isascii():
+        return hostname
+    return hostname.encode("idna").decode("ascii")
+
+
+def _resolve_dot_segments(path: str) -> str:
+    """
+    Remove "." and ".." segments from a path as described in
+    RFC 3986, section 5.2.4.
+
+    :param path: the path to resolve
+    :return: the path without any "." or ".." segments
+    """
+    input_ = path
+    output: list[str] = []
+    while input_:
+        if input_.startswith("../"):
+            input_ = input_[3:]
+        elif input_.startswith("./"):
+            input_ = input_[2:]
+        elif input_.startswith("/./"):
+            input_ = "/" + input_[3:]
+        elif input_ == "/.":
+            input_ = "/"
+        elif input_.startswith("/../"):
+            input_ = "/" + input_[4:]
+            if output:
+                output.pop()
+        elif input_ == "/..":
+            input_ = "/"
+            if output:
+                output.pop()
+        elif input_ in (".", ".."):
+            input_ = ""
+        else:
+            # move the first segment (incl. its leading "/") to the output
+            start = 1 if input_.startswith("/") else 0
+            next_slash = input_.find("/", start)
+            if next_slash == -1:
+                output.append(input_)
+                input_ = ""
+            else:
+                output.append(input_[:next_slash])
+                input_ = input_[next_slash:]
+    return "".join(output)
 
 
 class Url:
@@ -75,6 +142,14 @@ class Url:
         If a `url` is given it will use this as base and other
         parameters will replace/overwrite the parts of the url string.
 
+        The parts of a parsed `url` are stored percent-decoded, i.e. the
+        attributes hold the readable values ("my file.html", not
+        "my%20file.html") and :py:meth:`as_str` encodes them again; values
+        given as keyword arguments are expected to be unencoded as well.
+        Be aware that an encoded "/" (%2F) inside a path segment is decoded
+        like everything else and hence becomes a segment separator when the
+        URL is rendered again.
+
         Example::
 
             >>> url = Url("https://www.example.com/path/filename.json")
@@ -123,10 +198,14 @@ class Url:
         self.scheme = scheme or parse_result.scheme
         self.hostname = hostname or parse_result.hostname
         self.port = port or parse_result.port
-        self.path = path or parse_result.path
-        self.fragment = fragment or parse_result.fragment
-        self.username = username or parse_result.username
-        self.password = password or parse_result.password
+        # parsed parts are percent-decoded here and re-encoded in as_str();
+        # the attributes always hold the readable values
+        self.path = path or unquote(parse_result.path)
+        self.fragment = fragment or unquote(parse_result.fragment)
+        parsed_username = parse_result.username
+        self.username = username or (unquote(parsed_username) if parsed_username else None)
+        parsed_password = parse_result.password
+        self.password = password or (unquote(parsed_password) if parsed_password else None)
         self.query = Params(query or parse_result.query or "")
         # path params use ";" to separate the k=v pairs from the path and each other
         self.path_params = Params(path_params or parse_result.params or "", separator=";")
@@ -147,22 +226,64 @@ class Url:
     def authority(self, value: str) -> None:
         self.hostname, self.port = _split_authority(value)
 
+    @property
+    def parent(self) -> "Url":
+        """
+        A copy of this URL with the last path segment removed; the other
+        parts are kept. Like in pathlib, the parent of the root is the root.
+        """
+        parent_path, sep, _ = self.path.rstrip("/").rpartition("/")
+        if sep:
+            new_path = parent_path or "/"
+        else:
+            # no slash left: the parent of a bare relative segment is empty,
+            # the parent of the root stays the root
+            new_path = "/" if self.path.startswith("/") else ""
+        return self.copy(path=new_path)
+
+    @property
+    def name(self) -> str:
+        """
+        The last path segment (usually the file name); "" if the path is
+        empty or ends with a "/". Assigning replaces the last segment.
+        """
+        return self.path.rpartition("/")[2]
+
+    @name.setter
+    def name(self, value: str) -> None:
+        base, sep, _ = self.path.rpartition("/")
+        self.path = f"{base}{sep}{value}"
+
+    @property
+    def suffix(self) -> str:
+        """
+        The file extension of :py:attr:`name` including the ".";
+        "" if there is none.
+        """
+        name = self.name
+        dot_index = name.rfind(".")
+        # a name that is only a dotfile (".hidden") has no suffix
+        return name[dot_index:] if dot_index > 0 else ""
+
     def as_str(self) -> str:
         """
         Assemble the (possibly modified) parts back into a URL string.
+        The parts are percent-encoded as needed and a non-ASCII hostname
+        is IDNA-encoded (punycode).
 
         :return: the string representation of the URL
+        :raises UnicodeError: if the hostname cannot be IDNA-encoded
         """
         # the authority optionally has the port, username and password
-        authority = self.hostname or ""
+        authority = _encode_hostname(self.hostname) if self.hostname else ""
         if self.port:
             authority = f"{authority}:{self.port}"
 
         if self.username:
+            userinfo = quote(self.username, safe=_USERINFO_SAFE)
             if self.password:
-                authority = f"{self.username}:{self.password}@{authority}"
-            else:
-                authority = f"{self.username}@{authority}"
+                userinfo = f"{userinfo}:{quote(self.password, safe=_USERINFO_SAFE)}"
+            authority = f"{userinfo}@{authority}"
         elif self.password:
             log.warning("password given but no username, password is discarded!")
 
@@ -170,10 +291,10 @@ class Url:
         parts = (
             self.scheme,
             authority,
-            self.path,
+            quote(self.path, safe=_PATH_SAFE),
             self.path_params.as_str(),
             self.query.as_str(),
-            self.fragment,
+            quote(self.fragment, safe=_FRAGMENT_SAFE),
         )
         return str(urlunparse(parts))
 
@@ -253,6 +374,72 @@ class Url:
         :return: a new Url with only scheme, hostname and port set
         """
         return Url(scheme=self.scheme, hostname=self.hostname, port=self.port)
+
+    def normalize(self) -> "Url":
+        """
+        A normalized copy of this URL (RFC 3986 style): scheme and hostname
+        lowercased, the scheme's default port removed, "." and ".." path
+        segments resolved, and an empty path becomes "/" if there is a
+        hostname.
+
+        Example::
+
+            >>> Url("https://example.com:443/a/./b/../c").normalize()
+            Url(https://example.com/a/c)
+
+        :return: a new Url, this instance is not modified
+        """
+        scheme = self.scheme.lower()
+        hostname = self.hostname.lower() if self.hostname else self.hostname
+        port = self.port
+        if port is not None and _DEFAULT_PORTS.get(scheme) == port:
+            port = None
+        path = _resolve_dot_segments(self.path)
+        if hostname and not path:
+            path = "/"
+        return self.copy(scheme=scheme, hostname=hostname, port=port, path=path)
+
+    def as_dict(self) -> dict[str, Any]:
+        """
+        The URL parts as a plain dictionary (query and path params as
+        dictionaries of value lists), e.g. for debugging or serialization.
+        Contains the real password — use repr() for a redacted view.
+
+        :return: a dictionary of all URL parts
+        """
+        return {
+            "scheme": self.scheme,
+            "username": self.username,
+            "password": self.password,
+            "hostname": self.hostname,
+            "port": self.port,
+            "path": self.path,
+            "path_params": self.path_params.as_dict(),
+            "query": self.query.as_dict(),
+            "fragment": self.fragment,
+        }
+
+    def as_parse_result(self) -> ParseResult:
+        """
+        The URL as the named tuple :py:func:`urllib.parse.urlparse` returns,
+        for interoperability with stdlib-based code. The parts are
+        percent-encoded like in :py:meth:`as_str`.
+
+        :return: the ParseResult of the assembled URL string
+        """
+        return urlparse(self.as_str())
+
+    def is_absolute(self) -> bool:
+        """
+        :return: whether the URL has a hostname
+        """
+        return self.hostname is not None
+
+    def is_relative(self) -> bool:
+        """
+        :return: whether the URL has no hostname
+        """
+        return not self.is_absolute()
 
     def __eq__(self, other: object) -> bool:
         """
