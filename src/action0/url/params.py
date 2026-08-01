@@ -1,11 +1,19 @@
-import urllib
 from typing import Iterable
 from typing import Iterator
 from typing import Literal
+from typing import Mapping
 from typing import Union
+from typing import cast
 from urllib.parse import parse_qs
+from urllib.parse import urlencode
 
-ParamTypes = Union[Iterable[tuple[str, str | Iterable[str]]], dict[str, str | Iterable[str]], str]
+# Mapping instead of dict so callers may pass any dict-ish type and, unlike
+# dict, Mapping is covariant in its value type (a dict[str, str] works too)
+ParamTypes = Union[
+    Iterable[tuple[str, str | Iterable[str]]],
+    Mapping[str, str | Iterable[str]],
+    str,
+]
 
 
 class Params:
@@ -31,8 +39,10 @@ class Params:
         if isinstance(params, str):
             self._params = parse_qs(params, separator=self.separator)
 
-        elif isinstance(params, dict):
-            for key, value_s in params.items():
+        elif isinstance(params, Mapping):
+            # cast: the type checker cannot fully rule out the Iterable-of-tuples
+            # union member here because a Mapping is itself an Iterable
+            for key, value_s in cast("Mapping[str, str | Iterable[str]]", params).items():
                 if isinstance(value_s, str):
                     self._params.setdefault(key, []).append(value_s)
                 else:
@@ -65,6 +75,7 @@ class Params:
         """
         If only a key is given all values with this name are removed. If a
         value or a list of values is given only the matching values are removed.
+
         :param key: the name of the parameter to remove (or from which values
                     are to be removed)
         :param value: if given, only matching value(s) are to be removed not the
@@ -74,10 +85,18 @@ class Params:
         if value is None:
             return self._params.pop(key, [])
 
-        values = self._params.pop(key, [])
         value_list = [value] if isinstance(value, str) else list(value)
-        self._params[key] = [value_ for value_ in values if value_ not in value_list]
-        return values
+        values = self._params.get(key, [])
+        kept = [value_ for value_ in values if value_ not in value_list]
+        removed = [value_ for value_ in values if value_ in value_list]
+
+        # drop the key entirely once its last value is removed
+        if kept:
+            self._params[key] = kept
+        else:
+            self._params.pop(key, None)
+
+        return removed
 
     def set(self, key: str, value: Union[str, Iterable[str]]) -> None:
         """
@@ -99,7 +118,7 @@ class Params:
         self._params = {}
         return old
 
-    def as_str(self, sort=False) -> str:
+    def as_str(self, sort: bool = False) -> str:
         """
         A string representation of the parameters, url encoded.
 
@@ -109,14 +128,17 @@ class Params:
                  "foo=bar&bar=baz&bar=abc"
         """
         if sort:
-            _params = sorted(self._params)
+            # sort by parameter name first, then each name's values
+            _params = {key: sorted(values) for key, values in sorted(self._params.items())}
         else:
             _params = self._params
 
-        param_str = urllib.parse.urlencode(_params, doseq=True)
+        param_str = urlencode(_params, doseq=True)
 
+        # urlencode always joins with "&"; a literal separator inside a value is
+        # percent-encoded by then, so a plain replace cannot corrupt values
         if self.separator != "&":
-            param_str.replace("&", self.separator)
+            param_str = param_str.replace("&", self.separator)
 
         return param_str
 
@@ -156,7 +178,7 @@ class Params:
         :return: a dictionary with the parameters with a single value
                  for each key
         """
-        ret = {}
+        ret: dict[str, str] = {}
         for key, value in self._params.items():
             if value:
                 ret[key] = value[-1]
