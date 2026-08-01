@@ -3,6 +3,10 @@
 Easy URL parsing, manipulation and unparsing — a friendly, typed wrapper
 around {py:mod}`urllib.parse`.
 
+```shell
+pip install action0-url    # or: uv add action0-url
+```
+
 ```python
 from action0.url import Url
 
