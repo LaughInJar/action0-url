@@ -5,6 +5,9 @@ urllib.parse's methods (WIP).
 
 Requires Python 3.11 or newer.
 
+Full documentation including the API reference:
+<https://laughinjar.github.io/action0-url/>
+
 Either with an existing url:
 
 ```python
@@ -167,16 +170,18 @@ The project is managed with [uv](https://docs.astral.sh/uv/); `uv run`
 creates and syncs the virtual environment automatically:
 
 ```shell
-uv run pytest        # run the tests
+uv run pytest        # run the tests (incl. the docstring examples as doctests)
 uv run ruff check    # lint
 uv run ruff format   # format
 uv run mypy          # type-check (also: uv run pyright, uv run ty check)
+
+# build the docs (Sphinx; deployed to GitHub Pages on push to main)
+uv run --group docs sphinx-build -W docs docs/_build/html
 ```
 
 ## TODOs
 
- 1. Docs
- 2. Build & publish
+ 1. Build & publish
 
 ## About action0
 

@@ -8,9 +8,9 @@ from typing import cast
 from urllib.parse import parse_qs
 from urllib.parse import urlencode
 
-# a single parameter value; non-strings are coerced to strings on the way in
-# (bools become the web-style "true" / "false")
 ParamValue = Union[str, int, float, bool]
+"""A single parameter value; non-strings are coerced to strings on the way in
+(bools become the web-style ``"true"`` / ``"false"``)."""
 
 # Mapping instead of dict so callers may pass any dict-ish type and, unlike
 # dict, Mapping is covariant in its value type (a dict[str, str] works too)
@@ -19,6 +19,8 @@ ParamTypes = Union[
     Mapping[str, Union[ParamValue, Iterable[ParamValue]]],
     str,
 ]
+"""Everything that can initialize a :py:class:`Params` instance: a query
+string, a mapping, or an iterable of name/value(s) tuples."""
 
 
 def _coerce_value(value: ParamValue) -> str:
@@ -58,6 +60,19 @@ class Params(MutableMapping[str, str]):
     with a single value per key — the last one, like :py:meth:`singles`.
     Multi-value access is available through :py:meth:`get_all`,
     :py:meth:`add`, :py:meth:`as_dict` and :py:meth:`as_tuples`.
+
+    Example::
+
+        >>> params = Params("b=2&a=1")
+        >>> params["a"]
+        '1'
+        >>> params.add("a", 3)
+        >>> params.get_all("a")
+        ['1', '3']
+        >>> params.as_str()
+        'b=2&a=1&a=3'
+        >>> params.as_str(sort=True)
+        'a=1&a=3&b=2'
     """
 
     def __init__(

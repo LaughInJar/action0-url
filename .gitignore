@@ -11,3 +11,6 @@ wheels/
 
 # Editor files
 .idea
+
+# Sphinx build output
+docs/_build/
