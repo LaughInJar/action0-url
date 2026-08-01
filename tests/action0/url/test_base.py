@@ -1,4 +1,5 @@
 import unittest
+from urllib.parse import ParseResult
 
 from action0.url import Url
 
@@ -431,6 +432,251 @@ class UrlCopyTestCase(unittest.TestCase):
         """
         with self.assertRaises(TypeError):
             Url("https://example.com").copy(nonsense="x")
+
+
+class UrlEncodingTestCase(unittest.TestCase):
+    """
+    tests for the percent-/IDNA-encoding behavior of
+    :py:class:`action0.url.base.Url`
+    """
+
+    def test_path_encoded_on_output(self) -> None:
+        """
+        Test that spaces and non-ASCII characters in the path are
+        percent-encoded when rendering.
+        """
+        url = Url(scheme="https", hostname="example.com", path="/my files/päper.pdf")
+        self.assertEqual(url.as_str(), "https://example.com/my%20files/p%C3%A4per.pdf")
+
+    def test_path_decoded_on_parse(self) -> None:
+        """
+        Test that an encoded path is stored decoded and re-encoded losslessly.
+        """
+        url = Url("https://example.com/a%20b/c%C3%A4")
+        self.assertEqual(url.path, "/a b/cä")
+        self.assertEqual(url.as_str(), "https://example.com/a%20b/c%C3%A4")
+
+    def test_no_double_encoding(self) -> None:
+        """
+        Test that an encoded "%" round-trips without double encoding.
+        """
+        url = Url("https://example.com/a%2520b")
+        self.assertEqual(url.path, "/a%20b")
+        self.assertEqual(url.as_str(), "https://example.com/a%2520b")
+
+    def test_path_keeps_sub_delims(self) -> None:
+        """
+        Test that characters which may appear raw in a path stay raw.
+        """
+        url = Url(scheme="https", hostname="example.com", path="/a(1),b/c+d:e@f")
+        self.assertEqual(url.as_str(), "https://example.com/a(1),b/c+d:e@f")
+
+    def test_path_semicolon_encoded(self) -> None:
+        """
+        Test that a literal ";" in the path is encoded (it would start the
+        path params otherwise) and survives a round trip.
+        """
+        url = Url(scheme="https", hostname="example.com", path="/a;b")
+        self.assertEqual(url.as_str(), "https://example.com/a%3Bb")
+        self.assertEqual(Url(url.as_str()).path, "/a;b")
+
+    def test_fragment_encoding(self) -> None:
+        """
+        Test that the fragment is encoded and decoded like the path.
+        """
+        url = Url("https://example.com/x", fragment="see § 2")
+        self.assertEqual(url.as_str(), "https://example.com/x#see%20%C2%A7%202")
+        self.assertEqual(Url(url.as_str()).fragment, "see § 2")
+
+    def test_userinfo_encoding(self) -> None:
+        """
+        Test that reserved characters in username and password are encoded.
+        """
+        url = Url("https://example.com/", username="user name", password="p@ss:word")
+        self.assertEqual(url.as_str(), "https://user%20name:p%40ss%3Aword@example.com/")
+
+    def test_userinfo_decoded_on_parse(self) -> None:
+        """
+        Test that encoded userinfo is stored decoded and round-trips.
+        """
+        url = Url("https://user%40mail:pa%3Ass@example.com/")
+        self.assertEqual(url.username, "user@mail")
+        self.assertEqual(url.password, "pa:ss")
+        self.assertEqual(url.as_str(), "https://user%40mail:pa%3Ass@example.com/")
+
+    def test_hostname_punycode(self) -> None:
+        """
+        Test that a non-ASCII hostname is IDNA-encoded on output while the
+        attribute keeps the readable value.
+        """
+        url = Url(scheme="https", hostname="bücher.example", path="/x")
+        self.assertEqual(url.as_str(), "https://xn--bcher-kva.example/x")
+        self.assertEqual(url.hostname, "bücher.example")
+
+    def test_ascii_hostname_untouched(self) -> None:
+        """
+        Test that ASCII hostnames (incl. IPv6 literals) stay as they are.
+        """
+        self.assertEqual(Url("https://example.com/x").as_str(), "https://example.com/x")
+        self.assertEqual(Url(scheme="https", authority="[::1]:8080").hostname, "[::1]")
+
+
+class UrlNormalizeTestCase(unittest.TestCase):
+    """
+    tests for :py:meth:`action0.url.base.Url.normalize`
+    """
+
+    def test_lowercases_scheme_and_hostname(self) -> None:
+        """
+        Test that scheme and hostname are lowercased.
+        """
+        url = Url(scheme="HTTPS", hostname="Example.COM", path="/X")
+        normalized = url.normalize()
+        self.assertEqual(normalized.scheme, "https")
+        self.assertEqual(normalized.hostname, "example.com")
+        # the path's case is meaningful and untouched
+        self.assertEqual(normalized.path, "/X")
+
+    def test_removes_default_port(self) -> None:
+        """
+        Test that the scheme's default port is removed, others are kept.
+        """
+        self.assertIsNone(Url("https://example.com:443/x").normalize().port)
+        self.assertIsNone(Url("http://example.com:80/x").normalize().port)
+        self.assertIsNone(Url("ftp://example.com:21/x").normalize().port)
+        self.assertIsNone(Url("wss://example.com:443/x").normalize().port)
+        self.assertEqual(Url("https://example.com:8443/x").normalize().port, 8443)
+        self.assertEqual(Url("http://example.com:443/x").normalize().port, 443)
+
+    def test_resolves_dot_segments(self) -> None:
+        """
+        Test that "." and ".." segments are resolved (RFC 3986, 5.2.4).
+        """
+        self.assertEqual(Url("https://example.com/a/./b/../c").normalize().path, "/a/c")
+        self.assertEqual(Url("https://example.com/../a").normalize().path, "/a")
+        self.assertEqual(Url("https://example.com/a/b/..").normalize().path, "/a/")
+        self.assertEqual(Url("https://example.com/a/b/.").normalize().path, "/a/b/")
+
+    def test_empty_path_becomes_root(self) -> None:
+        """
+        Test that an empty path becomes "/" when there is a hostname.
+        """
+        self.assertEqual(Url("https://example.com").normalize().as_str(), "https://example.com/")
+
+    def test_does_not_modify(self) -> None:
+        """
+        Test that normalize() returns a new Url and keeps the original.
+        """
+        url = Url("https://example.com:443/a/./b")
+        url.normalize()
+        self.assertEqual(url.as_str(), "https://example.com:443/a/./b")
+
+
+class UrlPathHelpersTestCase(unittest.TestCase):
+    """
+    tests for the parent, name and suffix helpers of
+    :py:class:`action0.url.base.Url`
+    """
+
+    def test_parent(self) -> None:
+        """
+        Test that parent drops the last path segment and keeps the rest.
+        """
+        url = Url("https://example.com/a/b/file.html?q=1")
+        self.assertEqual(url.parent.as_str(), "https://example.com/a/b?q=1")
+        self.assertEqual(Url("https://example.com/a/b/").parent.path, "/a")
+        self.assertEqual(Url("https://example.com/a").parent.path, "/")
+
+    def test_parent_of_root_is_root(self) -> None:
+        """
+        Test that the parent of the root is the root.
+        """
+        self.assertEqual(Url("https://example.com/").parent.path, "/")
+
+    def test_parent_does_not_modify(self) -> None:
+        """
+        Test that parent returns a new Url and keeps the original.
+        """
+        url = Url("https://example.com/a/b")
+        self.assertEqual(url.parent.path, "/a")
+        self.assertEqual(url.path, "/a/b")
+
+    def test_name(self) -> None:
+        """
+        Test reading the last path segment.
+        """
+        self.assertEqual(Url("https://example.com/a/file.html").name, "file.html")
+        self.assertEqual(Url("https://example.com/a/").name, "")
+        self.assertEqual(Url("https://example.com").name, "")
+
+    def test_name_setter(self) -> None:
+        """
+        Test that assigning a name replaces the last path segment.
+        """
+        url = Url("https://example.com/docs/old.html?q=1")
+        url.name = "new.html"
+        self.assertEqual(url.as_str(), "https://example.com/docs/new.html?q=1")
+
+    def test_suffix(self) -> None:
+        """
+        Test reading the file extension of the name.
+        """
+        self.assertEqual(Url("https://example.com/a/file.html").suffix, ".html")
+        self.assertEqual(Url("https://example.com/a/archive.tar.gz").suffix, ".gz")
+        self.assertEqual(Url("https://example.com/a/file").suffix, "")
+        self.assertEqual(Url("https://example.com/a/.hidden").suffix, "")
+        self.assertEqual(Url("https://example.com/a/dir/").suffix, "")
+
+
+class UrlIntrospectionTestCase(unittest.TestCase):
+    """
+    tests for as_dict, as_parse_result and is_absolute/is_relative of
+    :py:class:`action0.url.base.Url`
+    """
+
+    def test_as_dict(self) -> None:
+        """
+        Test that all parts appear in the dictionary as plain types.
+        """
+        url = Url("https://user:pass@example.com:8443/p;v=1?a=1&a=2#f")
+        self.assertEqual(
+            url.as_dict(),
+            {
+                "scheme": "https",
+                "username": "user",
+                "password": "pass",
+                "hostname": "example.com",
+                "port": 8443,
+                "path": "/p",
+                "path_params": {"v": ["1"]},
+                "query": {"a": ["1", "2"]},
+                "fragment": "f",
+            },
+        )
+
+    def test_as_parse_result(self) -> None:
+        """
+        Test the conversion into the stdlib ParseResult named tuple.
+        """
+        url = Url("https://user:pass@example.com:8443/p?a=1#f")
+        result = url.as_parse_result()
+        self.assertIsInstance(result, ParseResult)
+        self.assertEqual(result.scheme, "https")
+        self.assertEqual(result.netloc, "user:pass@example.com:8443")
+        self.assertEqual(result.path, "/p")
+        self.assertEqual(result.query, "a=1")
+        self.assertEqual(result.fragment, "f")
+
+    def test_is_absolute_and_relative(self) -> None:
+        """
+        Test that absolute means "has a hostname".
+        """
+        self.assertTrue(Url("https://example.com/x").is_absolute())
+        self.assertFalse(Url("https://example.com/x").is_relative())
+
+        relative = Url(path="/a/b")
+        self.assertFalse(relative.is_absolute())
+        self.assertTrue(relative.is_relative())
 
 
 if __name__ == "__main__":
