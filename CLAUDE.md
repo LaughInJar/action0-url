@@ -30,6 +30,8 @@ uv run pyright         # type-check
 uv run ty check        # type-check
 
 uv run --group docs sphinx-build -W --keep-going -b html docs docs/_build/html  # build docs
+
+uv build               # build sdist + wheel into dist/
 ```
 
 `pytest` also runs the `>>>` examples in the docstrings as doctests (`--doctest-modules` over `src/`), so docstring examples must produce their shown output exactly.
@@ -44,6 +46,7 @@ Two modules under `src/action0/url/`:
 Conventions:
 
 - The version is single-sourced as `__version__` in `src/action0/url/__init__.py`; hatch extracts it with the regex in `[tool.hatch.version]`. Bump it only there.
+- Releases: pushing a `vX.Y.Z` tag triggers `.github/workflows/release.yml`, which re-runs all checks, verifies the tag matches `__version__`, builds, and publishes to PyPI via trusted publishing (environment `pypi`). Never bump the version, tag, or publish on your own — releasing is the user's call.
 - Tests mirror the `src/` layout under `tests/action0/url/` and are `unittest.TestCase` classes, executed via pytest.
 - Ruff enforces one import per line (isort `force-single-line`), line length 99, `action0` as first-party.
 - Docs live in `docs/` (Sphinx + Furo, MyST Markdown pages, autodoc for the API reference). Docstrings are Sphinx-reST (`:param:`, `:py:meth:` roles). CI builds them with `-W` on every run and deploys to GitHub Pages on pushes to `main`. Guide examples in `docs/usage.md` show exact outputs in `#` comments — keep them truthful.

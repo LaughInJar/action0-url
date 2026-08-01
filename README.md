@@ -1,12 +1,23 @@
 # Action0-Url
 
+[![CI](https://github.com/LaughInJar/action0-url/actions/workflows/ci.yml/badge.svg)](https://github.com/LaughInJar/action0-url/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/action0-url)](https://pypi.org/project/action0-url/)
+
 Easy URL parsing, manipulation and unparsing wrapper around 
-urllib.parse's methods (WIP).
+urllib.parse's methods.
 
 Requires Python 3.11 or newer.
 
 Full documentation including the API reference:
 <https://laughinjar.github.io/action0-url/>
+
+## Installation
+
+```shell
+pip install action0-url    # or: uv add action0-url
+```
+
+## Usage
 
 Either with an existing url:
 
@@ -179,9 +190,18 @@ uv run mypy          # type-check (also: uv run pyright, uv run ty check)
 uv run --group docs sphinx-build -W docs docs/_build/html
 ```
 
-## TODOs
+### Releasing
 
- 1. Build & publish
+The version lives only in `src/action0/url/__init__.py` (`__version__`).
+To release: bump it, merge to `main`, then tag the release commit and push
+the tag — the release workflow re-runs all checks, verifies the tag
+matches `__version__`, builds sdist + wheel and publishes to PyPI via
+trusted publishing:
+
+```shell
+git tag v0.1.0
+git push origin v0.1.0
+```
 
 ## About action0
 

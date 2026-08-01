@@ -5,8 +5,32 @@ authors = [
     { name="Simon Lachinger" },
 ]
 description = "Library for easily parsing and manipulating URLs"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = []
+keywords = ["url", "urllib", "parse", "query", "manipulation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/LaughInJar/action0-url"
+Documentation = "https://laughinjar.github.io/action0-url/"
+Source = "https://github.com/LaughInJar/action0-url"
+Issues = "https://github.com/LaughInJar/action0-url/issues"
 
 [dependency-groups]
 dev = [
