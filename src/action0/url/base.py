@@ -1,5 +1,7 @@
 import logging
+from typing import Any
 from urllib.parse import ParseResult
+from urllib.parse import urljoin
 from urllib.parse import urlparse
 from urllib.parse import urlunparse
 
@@ -7,6 +9,21 @@ from action0.url.params import Params
 from action0.url.params import ParamTypes
 
 log = logging.getLogger(__name__)
+
+
+def _split_authority(authority: str) -> tuple[str | None, int | None]:
+    """
+    Split an authority ("hostname" or "hostname:port") into its parts.
+
+    :param authority: the authority string to split
+    :return: a tuple of the hostname and the port
+    """
+    # split on the last ":" and only if digits follow it, so IPv6 literals
+    # like "[::1]" (colons but no port) stay intact
+    host_part, sep, port_part = authority.rpartition(":")
+    if sep and port_part.isdigit():
+        return host_part, int(port_part)
+    return authority or None, None
 
 
 class Url:
@@ -92,14 +109,7 @@ class Url:
         if authority:
             if hostname or port:
                 raise ValueError("Cannot specify both authority and hostname or port")
-            # split "hostname:port" on the last ":" and only if digits follow it,
-            # so IPv6 literals like "[::1]" (colons but no port) stay intact
-            host_part, sep, port_part = authority.rpartition(":")
-            if sep and port_part.isdigit():
-                hostname = host_part
-                port = int(port_part)
-            else:
-                hostname = authority
+            hostname, port = _split_authority(authority)
 
         if url is not None:
             parse_result = urlparse(url, scheme="https")
@@ -120,6 +130,22 @@ class Url:
         self.query = Params(query or parse_result.query or "")
         # path params use ";" to separate the k=v pairs from the path and each other
         self.path_params = Params(path_params or parse_result.params or "", separator=";")
+
+    @property
+    def authority(self) -> str:
+        """
+        The "hostname:port" combination (also known as netloc), just the
+        hostname if no port is set. Assigning a string of the same form
+        replaces hostname and port.
+        """
+        host = self.hostname or ""
+        if self.port:
+            return f"{host}:{self.port}"
+        return host
+
+    @authority.setter
+    def authority(self, value: str) -> None:
+        self.hostname, self.port = _split_authority(value)
 
     def as_str(self) -> str:
         """
@@ -151,8 +177,110 @@ class Url:
         )
         return str(urlunparse(parts))
 
+    def join(self, other: "str | Url") -> "Url":
+        """
+        Resolve another, possibly relative, URL against this one — like a
+        browser resolves a link on a page — wrapping
+        :py:func:`urllib.parse.urljoin`.
+
+        Example::
+
+            >>> Url("https://example.com/a/b").join("c")
+            Url(https://example.com/a/c)
+            >>> Url("https://example.com/a/b").join("/x")
+            Url(https://example.com/x)
+
+        :param other: the URL to resolve against this one
+        :return: a new Url, this instance is not modified
+        """
+        return Url(urljoin(self.as_str(), str(other)))
+
+    def __truediv__(self, segment: str) -> "Url":
+        """
+        Return a copy with the segment(s) appended to the path, always
+        joined with exactly one "/".
+
+        Example::
+
+            >>> Url("https://example.com") / "api" / "v2"
+            Url(https://example.com/api/v2)
+
+        :param segment: the path segment(s) to append
+        :return: a new Url, this instance is not modified
+        """
+        copied = self.copy()
+        copied.path = f"{self.path.rstrip('/')}/{segment.lstrip('/')}"
+        return copied
+
+    def copy(self, **overrides: Any) -> "Url":
+        """
+        An independent copy of this URL, optionally with parts replaced.
+
+        Example::
+
+            >>> url = Url("https://example.com:8443/index.html")
+            >>> url.copy(scheme="http", port=None)
+            Url(http://example.com/index.html)
+
+        :param overrides: any URL part accepted by the constructor
+        :return: a new Url, this instance is not modified
+        :raises TypeError: on part names the constructor does not know
+        :raises ValueError: if authority is combined with hostname or port
+        """
+        parts: dict[str, Any] = {
+            "scheme": self.scheme,
+            "hostname": self.hostname,
+            "port": self.port,
+            "path": self.path,
+            "query": self.query,
+            "path_params": self.path_params,
+            "fragment": self.fragment,
+            "username": self.username,
+            "password": self.password,
+        }
+        if "authority" in overrides:
+            # the constructor rejects authority combined with hostname / port
+            del parts["hostname"]
+            del parts["port"]
+        parts.update(overrides)
+        return Url(**parts)
+
+    def origin(self) -> "Url":
+        """
+        The origin — scheme, hostname and port only — e.g. for same-origin
+        comparisons or as a base to build new URLs on.
+
+        :return: a new Url with only scheme, hostname and port set
+        """
+        return Url(scheme=self.scheme, hostname=self.hostname, port=self.port)
+
+    def __eq__(self, other: object) -> bool:
+        """
+        Two Urls are equal if all their parts are equal. The order of query
+        parameter names doesn't matter (``?a=1&b=2`` equals ``?b=2&a=1``),
+        the order of multiple values of the same name does.
+
+        :param other: the Url to compare with
+        :return: whether the URLs are equal
+        """
+        if not isinstance(other, Url):
+            return NotImplemented
+        return (
+            self.scheme == other.scheme
+            and self.hostname == other.hostname
+            and self.port == other.port
+            and self.path == other.path
+            and self.path_params == other.path_params
+            and self.query == other.query
+            and self.fragment == other.fragment
+            and self.username == other.username
+            and self.password == other.password
+        )
+
     def __str__(self) -> str:
         return self.as_str()
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}({self.as_str()})"
+        # don't leak credentials into logs and tracebacks
+        url = self.copy(password="***") if self.password else self
+        return f"{self.__class__.__name__}({url.as_str()})"

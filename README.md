@@ -53,18 +53,30 @@ print(url)
 ## Working with query parameters
 
 `url.query` is a `Params` instance which supports single and multiple
-values per parameter name:
+values per parameter name. It behaves like a dict (a `MutableMapping`)
+where subscription works with a single value per name — the last one —
+while `add()`, `get_all()` and friends handle multiple values:
 
 ```python
 from action0.url import Url
 
 url = Url("https://example.com/?b=2&a=1&a=3")
-url.query.add("c", ["x", "y"])
+url.query["c"] = "4"          # replace/set values, like Params.set()
+url.query.add("c", ["x", 5])  # non-strings are coerced, bools become "true"/"false"
 url.query.remove("a", "1")
+print(url.query["a"])         # the single (last) value; use get() for a default
+# 3
+print(url.query.get_all("c"))
+# ['4', 'x', '5']
+print("b" in url.query, len(url.query))
+# True 3
 print(url.query.as_str())
-# b=2&a=3&c=x&c=y
+# b=2&a=3&c=4&c=x&c=5
 print(url.query.as_str(sort=True))
-# a=3&b=2&c=x&c=y
+# a=3&b=2&c=4&c=5&c=x
+url.query.update({"b": 9}, token="abc")  # replaces values of existing names
+print(url.query.as_str())
+# b=9&a=3&c=4&c=x&c=5&token=abc
 ```
 
 `Params` can also be used on its own, e.g. with a `;` separator as used
@@ -76,6 +88,38 @@ from action0.url import Params
 params = Params({"foo": "bar", "a": ["b", "c"]}, separator=";")
 print(params.as_str())
 # foo=bar;a=b;a=c
+```
+
+## Building and comparing URLs
+
+```python
+from action0.url import Url
+
+# append path segments with "/" (always returns a new Url)
+api = Url("https://example.com").origin() / "api" / "v2"
+print(api / "users")
+# https://example.com/api/v2/users
+
+# resolve links like a browser does
+print(Url("https://example.com/docs/intro.html").join("chapter2.html"))
+# https://example.com/docs/chapter2.html
+
+# derive variants without touching the original
+url = Url("https://user:secret@example.com:8443/index.html")
+print(url.copy(scheme="http", port=None))
+# http://user:secret@example.com/index.html
+
+# the authority ("hostname:port") and the origin as readable shortcuts
+print(url.authority, "|", url.origin())
+# example.com:8443 | https://example.com:8443
+
+# equality compares the parts; query parameter order doesn't matter
+print(Url("https://example.com?a=1&b=2") == Url("https://example.com?b=2&a=1"))
+# True
+
+# repr() never leaks the password (str() / as_str() keep it)
+print(repr(url))
+# Url(https://user:***@example.com:8443/index.html)
 ```
 
 ## Development
