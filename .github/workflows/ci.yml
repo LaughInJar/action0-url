@@ -89,12 +89,11 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    # the Pages site itself was enabled once via
+    # `gh api repos/<owner>/<repo>/pages -X POST -f build_type=workflow`;
+    # creating it from a workflow is impossible (GITHUB_TOKEN cannot get
+    # repo-administration rights)
     steps:
-      - name: Enable GitHub Pages for the repository
-        uses: actions/configure-pages@v5
-        with:
-          enablement: true
-
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
