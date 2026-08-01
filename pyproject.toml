@@ -5,12 +5,14 @@ authors = [
     { name="Simon Lachinger" },
 ]
 description = "Library for easily parsing and manipulating URLs"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = []
 
 [dependency-groups]
 dev = [
     "ipython>=8.39.0",
+    "mypy>=2.3.0",
+    "pyright>=1.1.411",
     "pytest>=9.0.3",
     "ruff>=0.15.6",
     "ty>=0.0.23",
@@ -24,13 +26,16 @@ build-backend = "hatchling.build"
 path = "src/action0/url/__init__.py"
 pattern = "__version__: str = \"(?P<version>[^\"]+)\""
 
+# ship the whole "action0" namespace package so the import name is
+# "action0.url" (hatch strips everything but the last path component)
 [tool.hatch.build.targets.wheel]
-packages = ["src/action0/url"]
+packages = ["src/action0"]
 
 [tool.ruff]
 line-length = 99
 indent-width = 4
-target-version = "py314"
+# lint against the oldest supported Python so newer-only syntax is flagged
+target-version = "py311"
 exclude = [
     ".git",
     "dist",
@@ -84,3 +89,20 @@ docstring-code-line-length = 99
 
 [tool.ruff.lint.pydocstyle]
 convention = "pep257"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+# check against the oldest supported Python version
+python_version = "3.11"
+files = ["src", "tests"]
+strict = true
+# "action0" is a PEP 420 namespace package (no __init__.py in src/action0),
+# so mypy needs the package root spelled out
+mypy_path = "src"
+explicit_package_bases = true
+
+[tool.pyright]
+# check against the oldest supported Python version
+pythonVersion = "3.11"
