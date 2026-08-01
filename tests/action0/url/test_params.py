@@ -1,4 +1,5 @@
 import unittest
+from collections.abc import MutableMapping
 
 from action0.url import Params
 
@@ -155,6 +156,28 @@ class ParamsInitTestCase(unittest.TestCase):
         params = Params([("foo", "bar"), ("a", "b"), ("foo", "baz"), ("a", ["c", "d"])])
         self.assertEqual(params.as_dict(), {"foo": ["bar", "baz"], "a": ["b", "c", "d"]})
         self.assertEqual(params.as_str(), "foo=bar&foo=baz&a=b&a=c&a=d")
+
+    def test_init_from_params(self) -> None:
+        """
+        Test that initialization from another Params instance copies all
+        values and results in an independent instance.
+        """
+        source = Params("foo=bar&foo=baz&a=b")
+        params = Params(source)
+        self.assertEqual(params.as_dict(), {"foo": ["bar", "baz"], "a": ["b"]})
+
+        params.add("foo", "new")
+        self.assertEqual(source.as_dict(), {"foo": ["bar", "baz"], "a": ["b"]})
+
+    def test_init_coerces_values(self) -> None:
+        """
+        Test that non-string values are coerced on initialization.
+        """
+        params = Params({"page": 2, "ratio": 1.5, "debug": True, "verbose": False})
+        self.assertEqual(
+            params.as_dict(),
+            {"page": ["2"], "ratio": ["1.5"], "debug": ["true"], "verbose": ["false"]},
+        )
 
 
 class ParamsAddTestCase(unittest.TestCase):
@@ -391,6 +414,258 @@ class ParamsViewsTestCase(unittest.TestCase):
         Test that uniq_tuples() yields one tuple per key with its last value.
         """
         self.assertEqual(list(self.params.uniq_tuples()), [("foo", "baz"), ("a", "b")])
+
+
+class ParamsMappingTestCase(unittest.TestCase):
+    """
+    tests for the MutableMapping interface of :py:class:`action0.url.params.Params`
+    """
+
+    def setUp(self) -> None:
+        self.params = Params("foo=bar&foo=baz&a=b")
+
+    def test_is_mutable_mapping(self) -> None:
+        """
+        Test that Params is registered as a MutableMapping.
+        """
+        self.assertIsInstance(self.params, MutableMapping)
+
+    def test_getitem_returns_last_value(self) -> None:
+        """
+        Test that subscription returns the single (last) value.
+        """
+        self.assertEqual(self.params["foo"], "baz")
+        self.assertEqual(self.params["a"], "b")
+
+    def test_getitem_missing_key(self) -> None:
+        """
+        Test that subscription with an unknown name raises a KeyError.
+        """
+        with self.assertRaises(KeyError):
+            self.params["nope"]
+
+    def test_get(self) -> None:
+        """
+        Test the inherited get() with and without a default.
+        """
+        self.assertEqual(self.params.get("foo"), "baz")
+        self.assertIsNone(self.params.get("nope"))
+        self.assertEqual(self.params.get("nope", "fallback"), "fallback")
+
+    def test_get_all(self) -> None:
+        """
+        Test that get_all() returns all values, or an empty list.
+        """
+        self.assertEqual(self.params.get_all("foo"), ["bar", "baz"])
+        self.assertEqual(self.params.get_all("nope"), [])
+
+    def test_get_all_returns_copy(self) -> None:
+        """
+        Test that mutating the returned list does not affect the params.
+        """
+        values = self.params.get_all("foo")
+        values.append("mutated")
+        self.assertEqual(self.params.get_all("foo"), ["bar", "baz"])
+
+    def test_setitem_replaces_values(self) -> None:
+        """
+        Test that assignment replaces all values, like set().
+        """
+        self.params["foo"] = "new"
+        self.assertEqual(self.params.get_all("foo"), ["new"])
+
+        self.params["foo"] = ["x", "y"]
+        self.assertEqual(self.params.get_all("foo"), ["x", "y"])
+
+    def test_delitem(self) -> None:
+        """
+        Test that del removes the parameter with all its values.
+        """
+        del self.params["foo"]
+        self.assertNotIn("foo", self.params)
+
+    def test_delitem_missing_key(self) -> None:
+        """
+        Test that del with an unknown name raises a KeyError.
+        """
+        with self.assertRaises(KeyError):
+            del self.params["nope"]
+
+    def test_contains(self) -> None:
+        """
+        Test the "in" operator.
+        """
+        self.assertIn("foo", self.params)
+        self.assertNotIn("nope", self.params)
+
+    def test_len_counts_keys(self) -> None:
+        """
+        Test that len() counts distinct names, not values.
+        """
+        self.assertEqual(len(self.params), 2)
+
+    def test_iter_yields_keys(self) -> None:
+        """
+        Test that iteration yields the parameter names.
+        """
+        self.assertEqual(list(self.params), ["foo", "a"])
+
+    def test_bool(self) -> None:
+        """
+        Test that empty Params are falsy and non-empty ones truthy.
+        """
+        self.assertTrue(self.params)
+        self.assertFalse(Params())
+
+    def test_items_and_values_are_single_view(self) -> None:
+        """
+        Test that the inherited items() and values() use the single-value
+        view (last value per key).
+        """
+        self.assertEqual(list(self.params.items()), [("foo", "baz"), ("a", "b")])
+        self.assertEqual(list(self.params.values()), ["baz", "b"])
+
+    def test_pop(self) -> None:
+        """
+        Test that the inherited pop() returns the single value and removes
+        the whole parameter.
+        """
+        self.assertEqual(self.params.pop("foo"), "baz")
+        self.assertNotIn("foo", self.params)
+
+
+class ParamsCoercionTestCase(unittest.TestCase):
+    """
+    tests for the coercion of non-string parameter values
+    """
+
+    def test_add_int_and_float(self) -> None:
+        """
+        Test that ints and floats are stringified.
+        """
+        params = Params()
+        params.add("page", 2)
+        params.add("ratio", 1.5)
+        self.assertEqual(params.as_str(), "page=2&ratio=1.5")
+
+    def test_add_bool(self) -> None:
+        """
+        Test that bools become the web-style "true" / "false".
+        """
+        params = Params()
+        params.add("debug", True)
+        params.add("verbose", False)
+        self.assertEqual(params.as_str(), "debug=true&verbose=false")
+
+    def test_set_mixed_values(self) -> None:
+        """
+        Test coercion of a list with mixed value types.
+        """
+        params = Params()
+        values: list[str | int | bool] = ["a", 1, True]
+        params.set("mixed", values)
+        self.assertEqual(params.get_all("mixed"), ["a", "1", "true"])
+
+    def test_set_empty_values_removes_key(self) -> None:
+        """
+        Test that setting an empty list of values removes the parameter.
+        """
+        params = Params("foo=bar")
+        params.set("foo", [])
+        self.assertNotIn("foo", params)
+
+    def test_remove_matches_coerced_values(self) -> None:
+        """
+        Test that remove() coerces the given value before matching.
+        """
+        params = Params("page=2&page=3")
+        self.assertEqual(params.remove("page", 2), ["2"])
+        self.assertEqual(params.get_all("page"), ["3"])
+
+
+class ParamsUpdateTestCase(unittest.TestCase):
+    """
+    tests for :py:meth:`action0.url.params.Params.update`
+    """
+
+    def test_update_replaces_existing_keys(self) -> None:
+        """
+        Test that update replaces the values of existing keys and adds new
+        keys (dict.update semantics).
+        """
+        params = Params("a=1&a=2&b=3")
+        params.update({"a": "x", "c": "y"})
+        self.assertEqual(params.as_dict(), {"a": ["x"], "b": ["3"], "c": ["y"]})
+
+    def test_update_from_query_string(self) -> None:
+        """
+        Test updating from a query string.
+        """
+        params = Params("a=1")
+        params.update("a=x&b=2")
+        self.assertEqual(params.as_dict(), {"a": ["x"], "b": ["2"]})
+
+    def test_update_from_params_keeps_multi_values(self) -> None:
+        """
+        Test that updating from another Params instance keeps all values
+        of a multi-value key.
+        """
+        params = Params("a=1")
+        params.update(Params("a=x&a=y"))
+        self.assertEqual(params.as_dict(), {"a": ["x", "y"]})
+
+    def test_update_with_kwargs(self) -> None:
+        """
+        Test updating via keyword arguments.
+        """
+        params = Params("a=1")
+        params.update(b="2", a=["x", "y"])
+        self.assertEqual(params.as_dict(), {"a": ["x", "y"], "b": ["2"]})
+
+
+class ParamsEqualityTestCase(unittest.TestCase):
+    """
+    tests for :py:meth:`action0.url.params.Params.__eq__`
+    """
+
+    def test_equal(self) -> None:
+        """
+        Test that equal parameters compare equal.
+        """
+        self.assertEqual(Params("a=1&a=2&b=3"), Params("a=1&a=2&b=3"))
+
+    def test_key_order_ignored(self) -> None:
+        """
+        Test that the order of the parameter names does not matter.
+        """
+        self.assertEqual(Params("a=1&b=2"), Params("b=2&a=1"))
+
+    def test_value_order_matters(self) -> None:
+        """
+        Test that the order of multiple values of one name does matter.
+        """
+        self.assertNotEqual(Params("a=1&a=2"), Params("a=2&a=1"))
+
+    def test_separator_ignored(self) -> None:
+        """
+        Test that the separator is presentation only and does not affect
+        equality.
+        """
+        self.assertEqual(Params("a=1&b=2"), Params("a=1;b=2", separator=";"))
+
+    def test_equal_to_plain_mapping(self) -> None:
+        """
+        Test comparison with a plain dict (in single- and multi-value form).
+        """
+        self.assertEqual(Params("a=1&a=2&b=x"), {"a": ["1", "2"], "b": "x"})
+        self.assertNotEqual(Params("a=1&a=2"), {"a": "2"})
+
+    def test_not_equal_to_other_types(self) -> None:
+        """
+        Test that comparison with non-mappings is False, not an error.
+        """
+        self.assertNotEqual(Params("a=1"), "a=1")
+        self.assertNotEqual(Params("a=1"), 42)
 
 
 if __name__ == "__main__":

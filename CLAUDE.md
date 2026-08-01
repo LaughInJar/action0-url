@@ -34,8 +34,8 @@ uv run ty check        # type-check
 
 Two modules under `src/action0/url/`:
 
-- `base.py` — `Url`: parses a URL string with `urllib.parse.urlparse`, holds each part (`scheme`, `hostname`, `port`, `path`, `path_params`, `fragment`, `username`, `password`) as a plain mutable attribute, and reassembles them with `urlunparse` in `as_str()`. Constructor keyword arguments override the corresponding parts of the base URL string. `url.query` is a `Params` instance, not a string.
-- `params.py` — `Params`: an insertion-ordered multi-value mapping (internally `dict[str, list[str]]`). All accepted input forms (query string, dict, iterable of tuples; values as a single string or an iterable of strings) are normalized to that internal shape. The same class serves query parameters (`&` separator) and path params (`;` separator).
+- `base.py` — `Url`: parses a URL string with `urllib.parse.urlparse`, holds each part (`scheme`, `hostname`, `port`, `path`, `path_params`, `fragment`, `username`, `password`) as a plain mutable attribute, and reassembles them with `urlunparse` in `as_str()`. Constructor keyword arguments override the corresponding parts of the base URL string. `url.query` is a `Params` instance, not a string. Convenience API: `join()`, the `/` operator, `copy(**overrides)`, `origin()`, the `authority` property, and part-wise `__eq__` (query key order ignored, per-key value order respected). `__repr__` redacts the password; `as_str()`/`str()` keep it.
+- `params.py` — `Params`: an insertion-ordered multi-value mapping (internally `dict[str, list[str]]`). It subclasses `MutableMapping`: the mapping view (`params[key]`, `get()`, `items()`, …) is single-value — the last value per key — while `get_all()`/`add()`/`as_dict()`/`as_tuples()` handle multiple values. All accepted input forms (query string, mapping, iterable of tuples, another `Params`) are normalized to the internal shape; non-string values are coerced (bools become `"true"`/`"false"`). The same class serves query parameters (`&` separator) and path params (`;` separator).
 
 Conventions:
 
