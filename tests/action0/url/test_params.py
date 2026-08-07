@@ -85,11 +85,12 @@ class ParamsInitTestCase(unittest.TestCase):
 
     def test_string_init_multiple_params_duplicates(self) -> None:
         """
-        Test that duplicate keys in a query string collect all their values.
+        Test that duplicate keys in a query string collect all their values
+        while the representation order is preserved.
         """
         params = Params("foo=bar&a=b&foo=baz")
         self.assertEqual(params.as_dict(), {"foo": ["bar", "baz"], "a": ["b"]})
-        self.assertEqual(params.as_str(), "foo=bar&foo=baz&a=b")
+        self.assertEqual(params.as_str(), "foo=bar&a=b&foo=baz")
 
     def test_dict_init_single_param(self) -> None:
         """
@@ -151,11 +152,11 @@ class ParamsInitTestCase(unittest.TestCase):
     def test_tuple_init_multiple_params_duplicates(self) -> None:
         """
         Test that repeated keys and iterable values in a list of tuples
-        collect all their values.
+        collect all their values while the given order is preserved.
         """
         params = Params([("foo", "bar"), ("a", "b"), ("foo", "baz"), ("a", ["c", "d"])])
         self.assertEqual(params.as_dict(), {"foo": ["bar", "baz"], "a": ["b", "c", "d"]})
-        self.assertEqual(params.as_str(), "foo=bar&foo=baz&a=b&a=c&a=d")
+        self.assertEqual(params.as_str(), "foo=bar&a=b&foo=baz&a=c&a=d")
 
     def test_init_from_params(self) -> None:
         """
@@ -690,6 +691,56 @@ class ParamsBlankValuesTestCase(unittest.TestCase):
         self.assertEqual(params["a"], "")
         self.assertEqual(params.get_all("a"), [""])
         self.assertIn("a", params)
+
+
+class ParamsOrderTestCase(unittest.TestCase):
+    """
+    tests for the preservation of the representation order (values of
+    duplicate keys interleaved with other keys)
+    """
+
+    def test_round_trip_preserves_interleaving(self) -> None:
+        """
+        Test that parsing and re-rendering keeps interleaved duplicates
+        (regression: values used to be grouped per key).
+        """
+        self.assertEqual(Params("a=1&b=2&a=3").as_str(), "a=1&b=2&a=3")
+
+    def test_add_appends_at_the_end(self) -> None:
+        """
+        Test that add() appends pairs at the end of the representation.
+        """
+        params = Params("a=1&b=2")
+        params.add("a", "3")
+        self.assertEqual(params.as_str(), "a=1&b=2&a=3")
+
+    def test_set_replaces_at_first_position(self) -> None:
+        """
+        Test that set() places the new values at the key's first position
+        and drops the key's other pairs.
+        """
+        params = Params("a=1&b=2&a=3")
+        params.set("a", ["x", "y"])
+        self.assertEqual(params.as_str(), "a=x&a=y&b=2")
+
+    def test_update_keeps_first_position(self) -> None:
+        """
+        Test that update() replaces existing keys in place and appends new
+        ones at the end.
+        """
+        params = Params("a=1&b=2&a=3")
+        params.update({"a": "x", "c": "y"})
+        self.assertEqual(params.as_str(), "a=x&b=2&c=y")
+
+    def test_as_single_tuples_representation_order(self) -> None:
+        """
+        Test that as_single_tuples() yields the pairs in representation
+        order.
+        """
+        self.assertEqual(
+            list(Params("a=1&b=2&a=3").as_single_tuples()),
+            [("a", "1"), ("b", "2"), ("a", "3")],
+        )
 
 
 class ParamsSortTestCase(unittest.TestCase):
