@@ -33,7 +33,7 @@ print(url.as_str())
 # https://www.example.com/path/filename.json?foo=baz&a=b
 url.query.add("foo", "123")
 print(url.as_str())
-# https://www.example.com/path/filename.json?foo=baz&foo=123&a=b
+# https://www.example.com/path/filename.json?foo=baz&a=b&foo=123
 url.hostname = "action0.com"
 url.port = 8443
 url.path = "/public/index.html"

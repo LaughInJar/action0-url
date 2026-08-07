@@ -53,7 +53,7 @@ class UrlParseTestCase(unittest.TestCase):
         self.assertEqual(url.as_str(), "https://www.example.com/path/filename.json?foo=baz&a=b")
         url.query.add("foo", "123")
         self.assertEqual(
-            url.as_str(), "https://www.example.com/path/filename.json?foo=baz&foo=123&a=b"
+            url.as_str(), "https://www.example.com/path/filename.json?foo=baz&a=b&foo=123"
         )
 
     def test_attribute_assignment(self) -> None:

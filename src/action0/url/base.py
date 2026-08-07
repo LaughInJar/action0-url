@@ -107,10 +107,10 @@ class Url:
         >>> url.query.add("a", "b")
         >>> url.as_str()
         'https://www.example.com/path/filename.json?foo=baz&a=b'
-        >>> # allow params with multiple values
+        >>> # allow params with multiple values (added at the end)
         >>> url.query.add("foo", "123")
         >>> url.as_str()
-        'https://www.example.com/path/filename.json?foo=baz&foo=123&a=b'
+        'https://www.example.com/path/filename.json?foo=baz&a=b&foo=123'
         >>> url.hostname = "action0.com"
         >>> url.port = 8443
         >>> url.path = "/public/index.html"
@@ -118,7 +118,7 @@ class Url:
         >>> url.password = "pass"
         >>> url.fragment = "fragment"
         >>> url.as_str()
-        'https://user:pass@action0.com:8443/public/index.html?foo=baz&foo=123&a=b#fragment'
+        'https://user:pass@action0.com:8443/public/index.html?foo=baz&a=b&foo=123#fragment'
 
     Based on the named tuple that :py:meth:`urllib.parse.urlparse` returns.
     """
