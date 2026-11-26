@@ -253,6 +253,11 @@ print(Url(signed).as_str() == signed, "|", Url(signed).path, "|", Url(signed).ra
 print(Url(scheme="https", hostname="bücher.example"))
 # https://xn--bcher-kva.example
 
+# what an HTTP request carries: the request target and the value of its Host header
+api = Url("https://bücher.example:8443/k%2Fey?sig=ab%2Bc#top")
+print(api.request_target, "|", api.raw_authority)
+# /k%2Fey?sig=ab%2Bc | xn--bcher-kva.example:8443
+
 # absolute means "has a scheme" (RFC 3986)
 print(url.is_absolute(), Url("file:///etc/hosts").is_absolute(), Url("//example.com/a").is_relative())
 # True True True

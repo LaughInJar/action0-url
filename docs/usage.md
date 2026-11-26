@@ -636,6 +636,41 @@ differs from current browsers (IDNA 2008 / UTS 46) for a few characters —
 matters, assign the punycode form as hostname; ASCII hostnames are never
 touched.
 
+### The parts of an HTTP request
+
+An HTTP request does not carry the URL as one string: the request line
+has the *request target* — path and query —, and the host travels in the
+`Host` header. Both are the URL's own spelling, and there is a property
+for each:
+
+```python
+url = Url("https://user:secret@bücher.example:8443/k%2Fey;v=1?sig=ab%2Bc&flag#top")
+print(url.request_target)
+# /k%2Fey;v=1?sig=ab%2Bc&flag
+print(url.raw_authority, "|", url.authority)
+# xn--bcher-kva.example:8443 | bücher.example:8443
+```
+
+`request_target` is the origin-form of RFC 9112: path, path params and
+query exactly as `as_str()` writes them — escapes are neither decoded nor
+re-encoded, so the target of a signed URL is the one that was signed —,
+without the fragment. It is always an absolute path: `/` stands in for an
+empty one, and a relative path gets the `/` it is written with behind a
+host. The prefixes that keep a path from being read as a host or a scheme
+in a URL string are not needed in a request line and not part of it:
+
+```python
+print(Url("https://example.com?page=2").request_target, "|", Url("items/5").request_target)
+# /?page=2 | /items/5
+print(Url(path="//files/x"), "|", Url(path="//files/x").request_target)
+# /.//files/x | //files/x
+```
+
+`raw_authority` is to `authority` what `raw_path` is to `path`: hostname
+and port as the URL string has them — a non-ASCII hostname IDNA-encoded,
+an IPv6 address in brackets — and, like the authority, never the
+userinfo. It is read-only; `authority` takes the encoded form as well.
+
 ## Introspection and interop
 
 ```python

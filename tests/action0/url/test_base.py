@@ -2185,3 +2185,230 @@ class UrlOriginAndNormalizeTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UrlRawAuthorityTestCase(unittest.TestCase):
+    """
+    tests for the raw_authority property of :py:class:`action0.url.base.Url`
+    """
+
+    def test_ascii_host_is_the_authority(self) -> None:
+        """
+        Test that for a plain hostname the raw authority is the authority,
+        with and without a port.
+        """
+        self.assertEqual(Url("https://example.com/x").raw_authority, "example.com")
+        self.assertEqual(Url("https://example.com:8443/x").raw_authority, "example.com:8443")
+
+    def test_non_ascii_hostname_is_idna_encoded(self) -> None:
+        """
+        Test that the hostname is written as in the URL string, while the
+        authority stays readable.
+        """
+        url = Url("https://bücher.example:8443/x")
+        self.assertEqual(url.authority, "bücher.example:8443")
+        self.assertEqual(url.raw_authority, "xn--bcher-kva.example:8443")
+        # a hostname given in punycode stays as it is
+        self.assertEqual(
+            Url("https://xn--bcher-kva.example").raw_authority, "xn--bcher-kva.example"
+        )
+
+    def test_ipv6(self) -> None:
+        """
+        Test that an IPv6 address is in brackets, its zone identifier
+        escaped as in the URL string.
+        """
+        self.assertEqual(Url("http://[::1]:8080/x").raw_authority, "[::1]:8080")
+        self.assertEqual(Url(hostname="2001:db8::1").raw_authority, "[2001:db8::1]")
+        self.assertEqual(Url("http://[fe80::1%25eth0]/x").raw_authority, "[fe80::1%25eth0]")
+
+    def test_excludes_userinfo(self) -> None:
+        """
+        Test that username and password are not part of it.
+        """
+        self.assertEqual(
+            Url("https://user:secret@example.com:8443/x").raw_authority, "example.com:8443"
+        )
+        self.assertEqual(Url("redis://:secret@localhost/0").raw_authority, "localhost")
+
+    def test_without_a_hostname(self) -> None:
+        """
+        Test URLs without an authority, with an empty one, and with a port
+        only.
+        """
+        self.assertEqual(Url("/a/b").raw_authority, "")
+        self.assertEqual(Url("mailto:someone@example.com").raw_authority, "")
+        self.assertEqual(Url("file:///etc/hosts").raw_authority, "")
+        self.assertEqual(Url(hostname="").raw_authority, "")
+        self.assertEqual(Url(port=8080).raw_authority, ":8080")
+
+    def test_is_what_the_url_string_has(self) -> None:
+        """
+        Test that the raw authority is the text between the "//" (and the
+        userinfo) and the path of the rendered URL.
+        """
+        for text in (
+            "https://example.com/a",
+            "https://user:pw@bücher.example:8443/a?b#c",
+            "http://[::1]:8080/a",
+            "https://EXAMPLE.com:443/a",
+            "//host/p",
+        ):
+            with self.subTest(url=text):
+                url = Url(text)
+                rendered = url.as_str().partition("//")[2].partition("/")[0]
+                self.assertEqual(url.raw_authority, rendered.rpartition("@")[2])
+
+    def test_follows_changes(self) -> None:
+        """
+        Test that the property reflects the hostname and port as they are
+        now.
+        """
+        url = Url("https://example.com/x")
+        url.hostname = "straße.example"
+        url.port = 444
+        self.assertEqual(url.raw_authority, "strasse.example:444")
+        url.authority = None
+        self.assertEqual(url.raw_authority, "")
+
+    def test_is_read_only(self) -> None:
+        """
+        Test that the raw authority cannot be assigned; the authority takes
+        the encoded form.
+        """
+        url = Url("https://example.com/x")
+        with self.assertRaises(AttributeError):
+            cast("Any", url).raw_authority = "other.org"
+        url.authority = "xn--bcher-kva.example:8443"
+        self.assertEqual(url.raw_authority, "xn--bcher-kva.example:8443")
+
+
+class UrlRequestTargetTestCase(unittest.TestCase):
+    """
+    tests for the request_target property of :py:class:`action0.url.base.Url`
+    """
+
+    def test_path_params_and_query(self) -> None:
+        """
+        Test that the target consists of path, path params and query, and
+        leaves out scheme, authority, userinfo and fragment.
+        """
+        url = Url("https://user:pw@example.com:8443/a/b;v=1?x=1&y=2#top")
+        self.assertEqual(url.request_target, "/a/b;v=1?x=1&y=2")
+        self.assertEqual(Url("https://example.com/a/b").request_target, "/a/b")
+
+    def test_spelling_is_kept(self) -> None:
+        """
+        Test that the target is the URL's own spelling, character for
+        character: escapes are neither decoded nor re-encoded, and the
+        query is written as it was.
+        """
+        for text, target in (
+            (
+                "https://bucket.example/k%2Fey?X-Signature=ab%2Bc&flag",
+                "/k%2Fey?X-Signature=ab%2Bc&flag",
+            ),
+            ("https://h/%7Euser/%FF?%FF", "/%7Euser/%FF?%FF"),
+            ("https://h/a?x=1&&y", "/a?x=1&&y"),
+            ("https://h/a%20b?c%20d=e+f", "/a%20b?c%20d=e+f"),
+            ("custom://h/a;b?c+d", "/a;b?c+d"),
+        ):
+            with self.subTest(url=text):
+                self.assertEqual(Url(text).request_target, target)
+
+    def test_is_the_tail_of_the_url_string(self) -> None:
+        """
+        Test that for a URL with a host and a path the target is what
+        follows the authority in the rendered URL, up to the fragment.
+        """
+        for text in (
+            "https://example.com/a%2Fb;v=1?sig=x%2By&flag#top",
+            "https://h//a",
+            "https://h/a;b/c;d=1",
+            "ftp://h/a;type=i",
+            "https://h/a b?c d=e f",
+        ):
+            with self.subTest(url=text):
+                url = Url(text)
+                tail = url.as_str().partition(f"//{url.raw_authority}")[2].partition("#")[0]
+                self.assertEqual(url.request_target, tail)
+
+    def test_empty_path_is_the_root(self) -> None:
+        """
+        Test that the target is an absolute path also when the URL has no
+        path: "/" stands in for it, ahead of path params and query.
+        """
+        self.assertEqual(Url("https://example.com").request_target, "/")
+        self.assertEqual(Url("https://example.com?page=2").request_target, "/?page=2")
+        # from parts: in a string, ";v=1" right behind the host is part of it
+        url = Url(scheme="https", hostname="example.com", path_params={"v": 1})
+        self.assertEqual(url.request_target, "/;v=1")
+        self.assertEqual(Url("").request_target, "/")
+        self.assertEqual(Url("?q=1").request_target, "/?q=1")
+        self.assertEqual(Url("#frag").request_target, "/")
+
+    def test_relative_path_becomes_absolute(self) -> None:
+        """
+        Test that a relative path gets the "/" it is written with behind a
+        host, whether the URL has a host or not.
+        """
+        self.assertEqual(Url("items/5").request_target, "/items/5")
+        self.assertEqual(
+            Url(scheme="https", hostname="h", path="items/5").request_target, "/items/5"
+        )
+        self.assertEqual(Url("mailto:someone@example.com").request_target, "/someone@example.com")
+
+    def test_no_prefixes_of_a_hostless_url(self) -> None:
+        """
+        Test that the prefixes as_str() needs for a path that would be
+        read as a host or as a scheme are not part of the target: in a
+        request line the path cannot be mistaken for either.
+        """
+        url = Url(path="//files/x")
+        self.assertEqual(url.as_str(), "/.//files/x")
+        self.assertEqual(url.request_target, "//files/x")
+        url = Url(path="javascript:alert(1)")
+        self.assertEqual(url.as_str(), "./javascript:alert(1)")
+        self.assertEqual(url.request_target, "/javascript:alert(1)")
+
+    def test_semicolon_in_the_last_segment(self) -> None:
+        """
+        Test that a ";" belonging to the path is escaped as as_str()
+        escapes it, so it is not read as the start of the path params.
+        """
+        url = Url(scheme="https", hostname="h", path="/a;b", path_params={"v": 1})
+        self.assertEqual(url.request_target, "/a%3Bb;v=1")
+
+    def test_follows_changes(self) -> None:
+        """
+        Test that the property reflects the parts as they are now, encoded
+        as needed.
+        """
+        url = Url("https://example.com/a?x=1")
+        url.path = "/reports/2026 Q1.pdf"
+        url.query["q"] = "a b"
+        self.assertEqual(url.request_target, "/reports/2026%20Q1.pdf?x=1&q=a+b")
+        url.query = None
+        url.path = None
+        self.assertEqual(url.request_target, "/")
+
+    def test_is_read_only(self) -> None:
+        """
+        Test that the target cannot be assigned.
+        """
+        with self.assertRaises(AttributeError):
+            cast("Any", Url("https://example.com/a")).request_target = "/b"
+
+    def test_subclass_with_own_constructor(self) -> None:
+        """
+        Test that both properties work for a subclass whose constructor
+        takes other arguments — they do not derive a new Url.
+        """
+
+        class Endpoint(Url):
+            def __init__(self, name: str) -> None:
+                super().__init__(f"https://api.example.com/{name}?v=2")
+
+        endpoint = Endpoint("users")
+        self.assertEqual(endpoint.request_target, "/users?v=2")
+        self.assertEqual(endpoint.raw_authority, "api.example.com")

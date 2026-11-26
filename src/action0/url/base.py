@@ -929,6 +929,65 @@ class Url:
         self._hostname, self._port = checked_hostname, checked_port
 
     @property
+    def raw_authority(self) -> str:
+        """
+        The :py:attr:`authority` as it is written in the URL string — what
+        :py:attr:`raw_path` is to :py:attr:`path`: a non-ASCII hostname is
+        IDNA-encoded (punycode), an IPv6 address is in brackets, and the
+        port follows if one is set. Like the authority it never contains
+        the userinfo. This is the value of the ``Host`` header of an HTTP
+        request for the URL.
+
+        >>> url = Url("https://user:secret@bücher.example:8443/x")
+        >>> url.authority
+        'bücher.example:8443'
+        >>> url.raw_authority
+        'xn--bcher-kva.example:8443'
+
+        It is "" for a URL without a hostname and port. Read-only: assign
+        to :py:attr:`authority`, which takes the encoded form as well.
+        """
+        return self._encoded_authority()
+
+    @property
+    def request_target(self) -> str:
+        """
+        The target of an HTTP request for this URL in its usual form, the
+        origin-form (:rfc:`9112`, section 3.2.1): the path, the path
+        params and the query, spelled exactly as :py:meth:`as_str` spells
+        them — percent escapes are neither decoded nor re-encoded, so the
+        target of a signed URL is the one that was signed. Scheme,
+        authority and fragment are not part of it.
+
+        >>> Url("https://example.com/a%2Fb;v=1?sig=x%2By&flag#top").request_target
+        '/a%2Fb;v=1?sig=x%2By&flag'
+
+        The target is always an absolute path: "/" stands in for an empty
+        path, and a relative path gets the "/" it would get behind a host.
+
+        >>> Url("https://example.com?page=2").request_target
+        '/?page=2'
+        >>> Url("items/5").request_target
+        '/items/5'
+
+        It is the path as it is written behind an authority, whether the
+        URL has one or not: the prefixes :py:meth:`as_str` puts in front
+        of a path that would be read as a host or a scheme ("/.", "./")
+        are not needed in a request line and not written.
+
+        >>> Url(path="//files/x").as_str(), Url(path="//files/x").request_target
+        ('/.//files/x', '//files/x')
+        """
+        parts = [self._encoded_path(with_authority=True) or "/"]
+        path_params = self._path_params.as_str()
+        if path_params:
+            parts.append(f";{path_params}")
+        query = self._query.as_str()
+        if query:
+            parts.append(f"?{query}")
+        return "".join(parts)
+
+    @property
     def parent(self) -> Self:
         """
         A copy of this URL with the last path segment — and the path params,
@@ -989,6 +1048,16 @@ class Url:
             or self._password is not None
         )
 
+    def _encoded_authority(self) -> str:
+        """
+        :return: hostname and port the way they are written in the URL
+                 string, without the userinfo; "" if neither is set
+        """
+        authority = _encode_hostname(self._hostname) if self._hostname else ""
+        if self._port is not None:
+            authority = f"{authority}:{self._port}"
+        return authority
+
     def _implies_authority(self) -> bool:
         """
         :return: whether the URL is rendered with an (empty) authority
@@ -1034,9 +1103,7 @@ class Url:
         :return: the URL string
         """
         with_authority = self._has_authority() or self._implies_authority()
-        authority = _encode_hostname(self._hostname) if self._hostname else ""
-        if self._port is not None:
-            authority = f"{authority}:{self._port}"
+        authority = self._encoded_authority()
         # a password does not need a username ("redis://:secret@localhost")
         if self._username or self._password:
             userinfo = self._username or ""
