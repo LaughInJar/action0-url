@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.2.1 — 2026-11-26
+
 ### Added
 
 - `Url.request_target`: the target of an HTTP request for the URL in its
