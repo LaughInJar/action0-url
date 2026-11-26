@@ -4,12 +4,27 @@ on:
   push:
     tags: ["v*"]
 
+# least privilege: the build only reads the repository, the publish job asks
+# for its OIDC token itself
+permissions:
+  contents: read
+
 jobs:
   build:
     name: check and build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # full history, to check below that the tag is part of main
+          fetch-depth: 0
+
+      - name: Check that the tagged commit is on main
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "tag $GITHUB_REF_NAME ($GITHUB_SHA) is not on main" >&2
+            exit 1
+          fi
 
       - name: Install uv
         uses: astral-sh/setup-uv@v10.0.1
@@ -36,6 +51,18 @@ jobs:
 
       - name: Build sdist and wheel
         run: uv build
+
+      # the checks above ran against the source tree; what gets published is
+      # the wheel, so run the tests against it on every supported Python
+      # (--no-project keeps the source tree out of the environment)
+      - name: Test the built wheel
+        run: |
+          for python in 3.11 3.12 3.13 3.14 3.15; do
+            echo "::group::python $python"
+            uv run --isolated --no-project --python "$python" \
+              --with dist/*.whl --with pytest pytest tests
+            echo "::endgroup::"
+          done
 
       - uses: actions/upload-artifact@v7
         with:

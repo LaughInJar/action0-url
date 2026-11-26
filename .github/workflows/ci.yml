@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# least privilege: the jobs only read the repository, the docs deployment
+# asks for what it needs itself
+permissions:
+  contents: read
+
 # cancel superseded runs of the same branch / PR
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
