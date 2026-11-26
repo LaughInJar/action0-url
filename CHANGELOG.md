@@ -6,7 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
-Nothing yet.
+### Added
+
+- `Url.request_target`: the target of an HTTP request for the URL in its
+  origin-form (RFC 9112) — path, path params and query exactly as
+  `as_str()` writes them, without the fragment. Always an absolute path:
+  `/` for an empty one, and without the `/.` and `./` prefixes a URL
+  string needs for a path that would be read as a host or a scheme.
+- `Url.raw_authority`: hostname and port as they are written in the URL
+  string — a non-ASCII hostname IDNA-encoded, an IPv6 address in
+  brackets, never the userinfo. The encoded twin of `authority`, as
+  `raw_path` is of `path`, and the value of an HTTP `Host` header.
+  Read-only.
 
 ## 0.2.0 — 2026-11-26
 
