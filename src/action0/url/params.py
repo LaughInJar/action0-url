@@ -1,53 +1,81 @@
-from typing import Iterable
-from typing import Iterator
+from collections.abc import Iterable
+from collections.abc import Iterator
+from collections.abc import Mapping
+from collections.abc import MutableMapping
 from typing import Literal
-from typing import Mapping
-from typing import MutableMapping
-from typing import Union
 from typing import cast
 from urllib.parse import parse_qsl
+from urllib.parse import quote
 from urllib.parse import urlencode
 
-ParamValue = Union[str, int, float, bool]
+ParamValue = str | int | float | bool
 """A single parameter value; non-strings are coerced to strings on the way in
 (bools become the web-style ``"true"`` / ``"false"``)."""
 
 # Mapping instead of dict so callers may pass any dict-ish type and, unlike
 # dict, Mapping is covariant in its value type (a dict[str, str] works too)
-ParamTypes = Union[
-    Iterable[tuple[str, Union[ParamValue, Iterable[ParamValue]]]],
-    Mapping[str, Union[ParamValue, Iterable[ParamValue]]],
-    str,
-]
+ParamTypes = (
+    Iterable[tuple[str, ParamValue | Iterable[ParamValue]]]
+    | Mapping[str, ParamValue | Iterable[ParamValue]]
+    | str
+)
 """Everything that can initialize a :py:class:`Params` instance: a query
 string, a mapping, or an iterable of name/value(s) tuples."""
 
+# characters that stay raw when rendering without form encoding (on top of
+# quote()'s always-safe unreserved characters): RFC 3986 pchar minus "&", ";"
+# and "=", which delimit the pairs, and "/", which would start a path segment
+_PLAIN_SAFE = ":@!$'()*+,"
 
-def _coerce_value(value: ParamValue) -> str:
+
+def _coerce_value(value: object) -> str:
     """
     Coerce a single parameter value to its string representation.
 
     :param value: the value to coerce
     :return: the value as a string, bools as "true" / "false"
+    :raises TypeError: for ``None`` and bytes, which have no obvious string form
     """
     # bool before the plain str() fallback: bools use the web convention
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, str):
         return value
+    # str() would turn these into "None" / "b'...'", which is never intended
+    if value is None or isinstance(value, (bytes, bytearray, memoryview)):
+        raise TypeError(
+            "parameter values must be str, int, float or bool (or an iterable "
+            f"of those), not {type(value).__name__}"
+        )
     return str(value)
 
 
-def _coerce_values(value_s: Union[ParamValue, Iterable[ParamValue]]) -> list[str]:
+def _coerce_values(value_s: object) -> list[str]:
     """
     Coerce a single value or an iterable of values to a list of strings.
 
     :param value_s: a single value or an iterable of values
     :return: all values as a list of strings
+    :raises TypeError: if a value is ``None`` or bytes
     """
-    if isinstance(value_s, (str, int, float, bool)):
+    # strings and bytes are iterable but single values; everything else that
+    # is not iterable (numbers, but also Decimal, date, UUID, ...) is one too
+    if isinstance(value_s, (str, bytes, bytearray, memoryview)) or not isinstance(
+        value_s, Iterable
+    ):
         return [_coerce_value(value_s)]
     return [_coerce_value(value_) for value_ in value_s]
+
+
+def _pair_key(pair: tuple[str, str]) -> str:
+    """
+    Sort key for the pairs: the name only, so that sorting (which is stable)
+    keeps the order of the values of one name.
+
+    :param pair: a (key, value) pair
+    :return: the key of the pair
+    """
+    return pair[0]
 
 
 class Params(MutableMapping[str, str]):
@@ -62,11 +90,17 @@ class Params(MutableMapping[str, str]):
     views (:py:meth:`as_dict`, :py:meth:`as_tuples`) collect the values per
     key instead.
 
-    Params implements :py:class:`typing.MutableMapping`: the mapping view
-    (``params[key]``, :py:meth:`get`, ``items()``, ``values()``, ...) works
-    with a single value per key — the last one, like :py:meth:`singles`.
-    Multi-value access is available through :py:meth:`get_all`,
-    :py:meth:`add`, :py:meth:`as_dict` and :py:meth:`as_tuples`.
+    Params implements :py:class:`collections.abc.MutableMapping`: the mapping
+    view works with a single value per key — the last one, like
+    :py:meth:`singles`. That holds for ``params[key]`` and for the methods
+    inherited from the mapping classes: ``get(key, default)``, ``keys()``,
+    ``items()``, ``values()``, ``pop(key)`` and ``popitem()`` (both return
+    the last value and remove all values of the key) and
+    ``setdefault(key, default)``. Multi-value access is available through
+    :py:meth:`get_all`, :py:meth:`add`, :py:meth:`as_dict` and
+    :py:meth:`as_tuples`.
+
+    Like every mutable mapping, Params instances are not hashable.
 
     Example::
 
@@ -83,7 +117,11 @@ class Params(MutableMapping[str, str]):
     """
 
     def __init__(
-        self, params: Union[ParamTypes, None] = None, separator: Literal["&", ";"] = "&"
+        self,
+        params: ParamTypes | None = None,
+        separator: Literal["&", ";"] = "&",
+        *,
+        form_encoding: bool = True,
     ) -> None:
         """
         :param params: the initial key-value(s) to set, either as a string which
@@ -91,26 +129,46 @@ class Params(MutableMapping[str, str]):
                        whose pairs are copied, or as a list of tuples or a
                        dictionary. The values can be single values or lists
                        of values; non-string values are coerced to strings
-                       (bools become "true" / "false"). Unlike parse_qsl's
-                       default, blank values are kept ("a=&b=1" keeps "a"), so
-                       parsing and re-rendering is lossless.
+                       (bools become "true" / "false", other objects go
+                       through ``str()``). A string is the bare parameter
+                       string, without a leading "?". Unlike parse_qsl's
+                       default, blank values are kept ("a=&b=1" keeps "a").
+                       Keys, values and their order survive parsing and
+                       re-rendering; the spelling is normalized though: a
+                       key without "=" gets one ("flag" becomes "flag="),
+                       empty pairs ("a=1&&b=2") are dropped and percent
+                       escapes are rewritten in their canonical form.
         :param separator: either a '&' or a ';' to separate the key-value pairs
                           in the string representation (also used when copying
                           another Params instance)
+        :param form_encoding: whether a space is written as "+" and a "+" is
+                              read as a space, as HTML forms and query strings
+                              do. Turn it off for parameters outside a query
+                              (:py:class:`~action0.url.base.Url` does so for
+                              its path params), then a space is written as
+                              "%20" and a "+" is a literal plus sign. Like the
+                              separator, it is not taken over when copying
+                              another Params instance.
+        :raises TypeError: if a value is ``None`` or bytes
         """
         self._pairs: list[tuple[str, str]] = []
         self.separator: Literal["&", ";"] = separator
+        self.form_encoding: bool = form_encoding
 
         if isinstance(params, Params):
             self._pairs = list(params._pairs)
 
         elif isinstance(params, str):
+            if not self.form_encoding:
+                # parse_qsl always reads "+" as a space; escaping it first
+                # keeps it a literal plus sign
+                params = params.replace("+", "%2B")
             self._pairs = parse_qsl(params, separator=self.separator, keep_blank_values=True)
 
         elif isinstance(params, Mapping):
             # cast: the type checker cannot fully rule out the Iterable-of-tuples
             # union member here because a Mapping is itself an Iterable
-            mapping = cast("Mapping[str, Union[ParamValue, Iterable[ParamValue]]]", params)
+            mapping = cast("Mapping[str, ParamValue | Iterable[ParamValue]]", params)
             for key, value_s in mapping.items():
                 self.add(key, value_s)
 
@@ -133,7 +191,7 @@ class Params(MutableMapping[str, str]):
                 return value
         raise KeyError(key)
 
-    def __setitem__(self, key: str, value: Union[ParamValue, Iterable[ParamValue]]) -> None:
+    def __setitem__(self, key: str, value: ParamValue | Iterable[ParamValue]) -> None:
         """
         Replace all values of the parameter, same as :py:meth:`set`.
 
@@ -179,7 +237,7 @@ class Params(MutableMapping[str, str]):
     def get_all(self, key: str) -> list[str]:
         """
         All values of the parameter in representation order; use
-        ``params[key]`` or :py:meth:`get` for the single-value view.
+        ``params[key]`` or ``get()`` for the single-value view.
 
         :param key: the parameter name
         :return: the values as a list, an empty list if the parameter
@@ -187,7 +245,7 @@ class Params(MutableMapping[str, str]):
         """
         return [value for pair_key, value in self._pairs if pair_key == key]
 
-    def add(self, key: str, value: Union[ParamValue, Iterable[ParamValue]]) -> None:
+    def add(self, key: str, value: ParamValue | Iterable[ParamValue]) -> None:
         """
         Add a parameter with a single value or multiple values, appended at
         the end of the representation. If it is a single value, the query
@@ -197,11 +255,12 @@ class Params(MutableMapping[str, str]):
 
         :param key: the parameter name to add
         :param value: the parameter value or list of values to add
+        :raises TypeError: if a value is ``None`` or bytes
         """
         self._pairs.extend((key, value_) for value_ in _coerce_values(value))
 
     def remove(
-        self, key: str, value: Union[ParamValue, Iterable[ParamValue], None] = None
+        self, key: str, value: ParamValue | Iterable[ParamValue] | None = None
     ) -> list[str]:
         """
         If only a key is given all values with this name are removed. If a
@@ -226,7 +285,7 @@ class Params(MutableMapping[str, str]):
         self._pairs = kept
         return removed
 
-    def set(self, key: str, value: Union[ParamValue, Iterable[ParamValue]]) -> None:
+    def set(self, key: str, value: ParamValue | Iterable[ParamValue]) -> None:
         """
         Replace all value(s) of the key with the value(s) given, at the
         position of the key's first pair (new keys are appended at the
@@ -234,6 +293,7 @@ class Params(MutableMapping[str, str]):
 
         :param key: the key to set values for
         :param value: a single value or a list of values to set
+        :raises TypeError: if a value is ``None`` or bytes
         """
         values = _coerce_values(value)
         if not values:
@@ -260,8 +320,9 @@ class Params(MutableMapping[str, str]):
     # arbitrary keys()/__getitem__ objects
     def update(  # type: ignore[override]  # ty: ignore[invalid-method-override]
         self,
-        params: Union[ParamTypes, None] = None,
-        **kwargs: Union[ParamValue, Iterable[ParamValue]],
+        params: ParamTypes | None = None,
+        /,
+        **kwargs: ParamValue | Iterable[ParamValue],
     ) -> None:
         """
         Merge the given parameters into this instance: values of keys that
@@ -270,11 +331,14 @@ class Params(MutableMapping[str, str]):
         forms as the constructor (query string, mapping, iterable of tuples,
         Params instance) plus keyword arguments.
 
-        :param params: the parameters to merge in
+        :param params: the parameters to merge in; positional-only, so that
+                       a parameter named "params" can be given as a keyword
+                       argument
         :param kwargs: parameters to merge in given as keyword arguments
+        :raises TypeError: if a value is ``None`` or bytes
         """
         if params is not None:
-            other = Params(params, self.separator)
+            other = Params(params, self.separator, form_encoding=self.form_encoding)
             for key in other:
                 self.set(key, other.get_all(key))
         for key, value_s in kwargs.items():
@@ -294,24 +358,30 @@ class Params(MutableMapping[str, str]):
 
     def sort(self) -> None:
         """
-        Sort the pairs in place by their name and then by their values — the
-        persistent equivalent of ``as_str(sort=True)``, which only sorts the
-        rendered output.
+        Sort the pairs in place by their name — the persistent equivalent of
+        ``as_str(sort=True)``, which only sorts the rendered output. The sort
+        is stable: the values of one name keep their order, so the sorted
+        instance still equals the unsorted one.
         """
-        self._pairs.sort()
+        self._pairs.sort(key=_pair_key)
 
     def as_str(self, sort: bool = False) -> str:
         """
         A string representation of the parameters, url encoded.
 
-        :param sort: sort the parameters by their name and then by their value, otherwise
-                     they'll be returned in the order of the representation
-        :return: the url encoded query / file parameter string, e.g.
+        :param sort: sort the parameters by their name (the values of one name keep
+                     their order), otherwise they'll be returned in the order of the
+                     representation
+        :return: the url encoded query / path parameter string, e.g.
                  "foo=bar&bar=baz&bar=abc"
         """
-        pairs = sorted(self._pairs) if sort else self._pairs
+        pairs = sorted(self._pairs, key=_pair_key) if sort else self._pairs
 
-        param_str = urlencode(pairs)
+        if self.form_encoding:
+            param_str = urlencode(pairs)
+        else:
+            # plain percent-encoding: a space becomes "%20", a "+" stays a "+"
+            param_str = urlencode(pairs, safe=_PLAIN_SAFE, quote_via=quote)
 
         # urlencode always joins with "&"; a literal separator inside a value is
         # percent-encoded by then, so a plain replace cannot corrupt values
@@ -373,8 +443,9 @@ class Params(MutableMapping[str, str]):
     def __eq__(self, other: object) -> bool:
         """
         Params are equal when they hold the same keys with the same values in
-        the same per-key order; the order of the keys and the separator don't
-        matter. Plain mappings are converted to Params before comparing.
+        the same per-key order; the order of the keys, the separator and the
+        form encoding don't matter. Plain mappings are converted to Params
+        before comparing; one that cannot be converted is simply not equal.
 
         :param other: the Params instance or mapping to compare with
         :return: whether the parameters are equal
@@ -384,7 +455,12 @@ class Params(MutableMapping[str, str]):
         if isinstance(other, Mapping):
             # cast: the values of an arbitrary mapping are unknown to the
             # type checker; non-string values are coerced like everywhere else
-            return self.as_dict() == Params(cast("ParamTypes", other)).as_dict()
+            try:
+                other_params = Params(cast("ParamTypes", other))
+            except TypeError:
+                # values Params cannot hold (None, bytes) can never be equal
+                return False
+            return self.as_dict() == other_params.as_dict()
         return NotImplemented
 
     def __str__(self) -> str:

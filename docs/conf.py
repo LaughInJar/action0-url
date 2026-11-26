@@ -17,7 +17,6 @@ release = __version__
 extensions = [
     "myst_parser",
     "sphinx.ext.autodoc",
-    "sphinx.ext.doctest",
     "sphinx.ext.intersphinx",
     "sphinx.ext.viewcode",
     "sphinx_autodoc_typehints",

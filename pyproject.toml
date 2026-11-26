@@ -31,6 +31,7 @@ Homepage = "https://github.com/LaughInJar/action0-url"
 Documentation = "https://laughinjar.github.io/action0-url/"
 Source = "https://github.com/LaughInJar/action0-url"
 Issues = "https://github.com/LaughInJar/action0-url/issues"
+Changelog = "https://github.com/LaughInJar/action0-url/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
@@ -61,6 +62,16 @@ pattern = "__version__: str = \"(?P<version>[^\"]+)\""
 # "action0.url" (hatch strips everything but the last path component)
 [tool.hatch.build.targets.wheel]
 packages = ["src/action0"]
+
+# the sdist is for building and testing the package: leave out what only
+# matters inside the repository
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.github",
+    "/.python-version",
+    "/CLAUDE.md",
+    "/uv.lock",
+]
 
 [tool.ruff]
 line-length = 99
@@ -117,9 +128,6 @@ docstring-code-format = true
 # This only has an effect when the `docstring-code-format` setting is
 # enabled.
 docstring-code-line-length = 99
-
-[tool.ruff.lint.pydocstyle]
-convention = "pep257"
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "src"]
