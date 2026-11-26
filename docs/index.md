@@ -29,7 +29,9 @@ print(url)
   {py:meth}`~action0.url.base.Url.normalize`, pathlib-style `parent` /
   `name` / `suffix`.
 - Parts are stored percent-decoded and re-encoded on rendering; non-ASCII
-  hostnames become punycode.
+  hostnames become punycode, IPv6 hosts get their brackets.
+- Works for absolute URLs of any scheme and for relative references alike —
+  nothing is assumed about parts a URL doesn't have.
 - Fully typed (checked with mypy strict, pyright and ty), zero runtime
   dependencies, Python 3.11+.
 
@@ -41,4 +43,5 @@ personal projects.
 
 usage
 api
+changelog
 ```
