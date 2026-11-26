@@ -31,14 +31,25 @@ url_str = "https://www.example.com:8443/docs/api.html?q=python#intro"
 assert Url(url_str).as_str() == url_str
 ```
 
-All parts and their order survive; what can change is the *spelling* of an
-equivalent URL: the hostname is lowercased, percent escapes are written in
-their canonical form and a query parameter without `=` gets one (`?flag`
-becomes `?flag=`). The two lossy corners are listed under
-[Encoding](#encoding).
+A URL you don't modify is rendered the way it was written — percent
+escapes, the order and spelling of the query, all of it — so signed URLs
+and hand-crafted ones are safe to pass through:
+
+```python
+signed = "https://bucket.example/k%2Fey?X-Signature=ab%2Bc%2f&flag&x=a%20b"
+assert Url(signed).as_str() == signed
+```
+
+Only these things are normalized: scheme and hostname are lowercased,
+characters that are not allowed in a URL are percent-encoded
+(`/a b` becomes `/a%20b`), and delimiters without content are left out
+(a trailing `?` or `#`, the `:` of `user:@host`). How the parts you
+*change* are encoded is described under [Encoding](#encoding).
 
 An unparsable URL — a non-numeric or out-of-range port, a broken IPv6
-address — raises a `ValueError`.
+address, a hostname with impossible characters — raises a `ValueError`
+(which never contains the password, see
+[Logging and secrets](#logging-and-secrets)).
 
 ### Relative URLs
 
@@ -51,13 +62,15 @@ print(repr(url.scheme), url.hostname)  # '' None
 print(url)                             # /docs/index.html?lang=en
 ```
 
-As in {py:func}`urllib.parse.urlparse`, a hostname is only recognized
-after `//` — without it the text is a relative path:
+As in {py:func}`urllib.parse.urlsplit`, a hostname is only recognized
+after `//` — without it the text is a relative path, and a `:` early on
+makes what is in front of it a scheme:
 
 ```python
 print(Url("//example.com/x").hostname)  # example.com
 print(Url("example.com/x").hostname)    # None
 print(Url("example.com/x").path)        # example.com/x
+print(repr(Url("localhost:8080").scheme), Url("localhost:8080").path)  # 'localhost' 8080
 ```
 
 `as_str()`, `str(url)` and `print(url)` are equivalent ways to render the
@@ -102,6 +115,48 @@ print(Url("https://user:pw@www.example.com:8443/a?b=1#c", password=None, port=No
 Values are given unencoded and without their delimiter: no leading `?`
 for the query, no `#` for the fragment.
 
+(validation)=
+### Validation
+
+Every part is checked when it is set — by a keyword argument, by `copy()`
+or by assigning to the attribute — so a `Url` can always be rendered. A
+value the part cannot have raises a `ValueError`, a value of the wrong type
+a `TypeError`:
+
+```python
+for arguments in (
+    {"scheme": "https://"},        # the scheme only, please
+    {"hostname": "localhost:8080"},  # the port is a part of its own
+    {"hostname": "example.com/x"},
+    {"port": 99999},
+    {"port": "8080"},
+    {"path": 5},
+):
+    try:
+        Url(**arguments)
+    except (ValueError, TypeError) as error:
+        print(arguments, "->", type(error).__name__)
+# {'scheme': 'https://'} -> ValueError
+# {'hostname': 'localhost:8080'} -> ValueError
+# {'hostname': 'example.com/x'} -> ValueError
+# {'port': 99999} -> ValueError
+# {'port': '8080'} -> TypeError
+# {'path': 5} -> TypeError
+```
+
+The messages say what is wrong and, where there is an obvious fix, what
+to do instead:
+
+```python
+try:
+    Url(scheme="http", hostname="localhost:8080")
+except ValueError as error:
+    print(error)
+# Invalid hostname 'localhost:8080': a ':' is only allowed in an IPv6 address (pass a port as port=... or use authority=...)
+```
+
+Scheme and hostname are case-insensitive and stored in lowercase.
+
 Hostname and port can also be given as one `authority` string (handy when
 that is what your config file contains):
 
@@ -120,9 +175,20 @@ print(Url("https://example.com:8443/x", authority="other.org"))
 # https://other.org/x
 ```
 
+Username and password are *not* touched when hostname or authority are
+replaced — remove them too if the new host must not get the credentials:
+
+```python
+print(Url("https://user:secret@example.com/x", authority="other.org"))
+# https://user:secret@other.org/x
+print(Url("https://user:secret@example.com/x", authority="other.org", username=None, password=None))
+# https://other.org/x
+```
+
 ## Changing parts
 
-Attributes are plain and mutable — assign and render:
+Every part is an attribute — assign and render. Assignments are
+[validated](#validation) and `None` removes a part:
 
 ```python
 url = Url("https://www.example.com/shop/list.html?sort=price")
@@ -136,10 +202,25 @@ print(url)
 url.authority = "other.org:9000"  # replaces hostname and port at once
 print(url)
 # https://other.org:9000/v2/items?sort=price#top
+url.fragment = None
+print(url)
+# https://other.org:9000/v2/items?sort=price
+url.fragment = "top"
+```
+
+A misspelled attribute is an error, not a silent no-op:
+
+```python
+try:
+    url.host = "example.com"
+except AttributeError as error:
+    print(error)
+# 'Url' object has no attribute 'host' and no __dict__ for setting new attributes
 ```
 
 `url.query` and `url.path_params` can be assigned as well — anything a
-`Params` can be built from, or `None` to remove them all:
+`Params` can be built from, or `None` to remove them all. What you assign
+is copied, two `Url`s never share their parameters:
 
 ```python
 url.query = "sort=name&page=2"
@@ -163,6 +244,24 @@ print(url)            # http://[::1]:8080/status
 print(Url(scheme="http", hostname="2001:db8::1", port=8080))
 # http://[2001:db8::1]:8080
 ```
+
+### URLs without a host
+
+Some URLs have an authority that is empty — the `//` is there, but nothing
+follows: `file:///etc/hosts`, `sqlite:///data.db`. Their `hostname` is `""`,
+while it is `None` for a URL that has no authority at all. The two are
+different URLs, so the difference is kept:
+
+```python
+print(repr(Url("sqlite:///data.db").hostname), repr(Url("sqlite:/data.db").hostname))
+# '' None
+print(Url(scheme="sqlite", hostname="", path="/data.db"))
+# sqlite:///data.db
+print(Url("sqlite:////var/lib/app/data.db").path)   # an absolute file path
+# //var/lib/app/data.db
+```
+
+(`file:` URLs always get their `//`, also when built without a hostname.)
 
 ### Credentials
 
@@ -209,22 +308,25 @@ print(query)
 # b=5&a=9&c=new
 ```
 
-Values that are not strings are converted: bools become `"true"` /
-`"false"`, numbers and any other object go through `str()`. `None` and
-bytes have no obvious string form and raise a `TypeError`:
+Names are strings; values are strings, ints, floats and bools — the
+numbers are written the way Python prints them, bools become `"true"` /
+`"false"`. Everything else (`None`, bytes, dates, decimals, ...) raises a
+`TypeError` instead of being guessed at; convert it yourself:
 
 ```python
 import datetime
 
-query["since"] = datetime.date(2026, 1, 31)
-print(query["since"])  # 2026-01-31
 try:
-    query["broken"] = None
+    query["since"] = datetime.date(2026, 1, 31)
 except TypeError as error:
     print(error)
-# parameter values must be str, int, float or bool (or an iterable of those), not NoneType
+# parameter values must be str, int, float or bool (or an iterable of those), not date; convert other objects with str()
+query["since"] = str(datetime.date(2026, 1, 31))
+print(query["since"])  # 2026-01-31
 del query["since"]
 ```
+
+`update()` is all or nothing: if one value is rejected, nothing changes.
 
 ### Views and conversions
 
@@ -260,13 +362,39 @@ Sorting is by name only: the values of one name keep their order (it can
 be meaningful, and it is what [equality](#comparing-and-normalizing)
 compares), so a sorted `Params` still equals the unsorted one.
 
-When parsing a string, pass the bare query without the leading `?`. The
-spelling is normalized on the way through:
+When parsing a string, pass the bare query without the leading `?`.
+Parsed parameters are rendered exactly as they were written until you
+modify them; from then on they are written from the pairs, in a normalized
+spelling:
 
 ```python
-print(Params("flag&a=1&&b=x%20y"))  # "=" added, empty pair dropped, "%20" -> "+"
-# flag=&a=1&b=x+y
+params = Params("flag&a=1&&b=x%20y")
+print(params)        # reading changes nothing
+# flag&a=1&&b=x%20y
+params.add("c", 3)   # "=" added, empty pair dropped, "%20" -> "+"
+print(params)
+# flag=&a=1&b=x+y&c=3
 ```
+
+(parameters-and-plus)=
+### `+` and spaces
+
+In the query of a web URL a space is written as `+` (form encoding), so a
+`+` *read* from such a query is a space. That is a convention of the web,
+not of URLs in general: in a `mailto:` URL, in most custom schemes and in
+path parameters a `+` is a plus sign. `Url` therefore treats the query as
+form-encoded for `http`, `https`, `ws`, `wss` and for URLs without a scheme,
+and as plain percent-encoded for everything else:
+
+```python
+print(Url("https://example.com/?q=1+1").query["q"])        # 1 1
+print(Url("mailto:me@example.com?body=1+1").query["body"])  # 1+1
+print(Url(scheme="mailto", path="me@example.com", query={"body": "a b"}))
+# mailto:me@example.com?body=a%20b
+```
+
+It is the scheme the URL has when the query is parsed or assigned that
+decides; `url.query.form_encoding = True` (or `False`) overrides it.
 
 ## Path parameters
 
@@ -295,9 +423,17 @@ print(url)
 # https://example.com/calc;expr=a%20b?q=1+2
 ```
 
-Only the last path segment can have parameters (and only for the schemes
-urllib knows them for, e.g. `http`, `https`, `ftp`); a `;` anywhere else
-is simply part of the path.
+Only the last path segment can have parameters, and only for the schemes
+that are known to use them (`http`, `https`, `ftp` and a few more, plus
+URLs without a scheme); a `;` anywhere else is simply part of the path.
+The parameters stay with their segment when the path changes:
+
+```python
+url = Url("https://example.com/a/b;v=1")
+print(url / "c")    # https://example.com/a/b;v=1/c
+print(url.parent)   # https://example.com/a
+print(Url("file:///a/report;final.txt").path)  # /a/report;final.txt
+```
 
 `Params` also works standalone:
 
@@ -327,7 +463,7 @@ print(Url() / "api" / "v2")  # a relative URL stays relative
 ### Resolving links
 
 {py:meth}`~action0.url.base.Url.join` resolves a (possibly relative)
-reference against the URL, exactly like a browser resolves a link
+reference against the URL, the way a link on a page is resolved
 (RFC 3986, section 5.2):
 
 ```python
@@ -344,7 +480,13 @@ for relative base URLs:
 ```python
 print(Url("myapp://host/a/b").join("../c?d=1"))  # myapp://host/c?d=1
 print(Url("docs/guide/intro.html").join("../ref.html"))  # docs/ref.html
+print(Url("https://example.com/list?filter=x").join("?"))  # https://example.com/list
 ```
+
+It follows the RFC to the letter where `urljoin` is lenient: a reference
+with a scheme is never relative (`http:g` stays `http:g`), and the result
+has the fragment of the reference — none, if it has none. The result is
+always an instance of the class `join()` is called on.
 
 ### parent, name and suffix
 
@@ -376,33 +518,54 @@ print(url)  # the original is untouched
 ```
 
 `copy()`, `origin()`, `join()`, `/`, `parent` and `normalize()` return an
-instance of the same class, so subclasses of `Url` stay what they are.
+instance of the same class, so subclasses of `Url` stay what they are —
+also subclasses with a constructor of their own, and with the attributes
+they add. `copy.copy()` and `copy.deepcopy()` work as well.
 
 (comparing-and-normalizing)=
 ## Comparing and normalizing
 
-Equality compares the parts; the order of query parameter *names* doesn't
-matter, the order of multiple values per name does:
+Two `Url`s are equal if they are *equivalent*, i.e. rendered the same
+apart from the spelling of percent escapes. The order of query (and path)
+parameter *names* doesn't matter, the order of multiple values per name
+does:
 
 ```python
 print(Url("https://example.com?a=1&b=2") == Url("https://example.com?b=2&a=1"))
 # True
-print(Url("https://example.com/a?x=1").origin() == Url("https://example.com/b").origin())
+print(Url("https://example.com/%7Euser") == Url("https://example.com/~user"))
 # True
+print(Url("https://bücher.example/") == Url("https://xn--bcher-kva.example/"))
+# True
+print(Url("https://example.com/a%2Fb") == Url("https://example.com/a/b"))  # one segment vs. two
+# False
+```
+
+{py:meth}`~action0.url.base.Url.origin` reduces a URL to scheme, hostname
+and port — without the scheme's default port — for same-origin checks:
+
+```python
+print(Url("https://example.com:443/a?x=1").origin() == Url("https://example.com/b").origin())
+# True
+print(Url("https://example.com:443/a?x=1").origin())
+# https://example.com
 ```
 
 Being mutable and compared by their parts, `Url` and `Params` are not
 hashable — use `str(url)` as dictionary key or set member.
 
 {py:meth}`~action0.url.base.Url.normalize` returns an RFC 3986-normalized
-copy — lowercased scheme and hostname, default ports removed, `.` / `..`
-segments resolved and, if there is a hostname, the path made absolute:
+copy — default ports removed, percent escapes in their canonical form,
+`.` / `..` segments resolved and, if there is a hostname, the path made
+absolute (an empty one becomes `/`):
 
 ```python
 print(Url("https://example.com:443/a/../b").normalize())
 # https://example.com/b
-print(Url(scheme="HTTPS", hostname="Example.COM", path="index.html").normalize())
-# https://example.com/index.html
+print(Url("https://example.com/%7euser/%c3%a4").normalize())
+# https://example.com/~user/%C3%A4
+print(Url("https://example.com").normalize())
+# https://example.com/
 ```
 
 The path of a relative URL stays relative; `..` segments with nothing to
@@ -416,8 +579,10 @@ print(Url("a/../../b").normalize())   # ../b
 (encoding)=
 ## Encoding
 
-Attributes hold percent-decoded ("readable") values; rendering encodes
-them again. Non-ASCII hostnames become punycode:
+Inside a `Url` the parts are kept the way they are written in a URL —
+percent-encoded — which is what makes parsing and rendering an exact round
+trip. The attributes show and take the decoded, readable values; what you
+assign is encoded as needed. Non-ASCII hostnames become punycode:
 
 ```python
 url = Url("https://example.com", path="/reports/2026 Q1.pdf", fragment="§ 2")
@@ -432,20 +597,37 @@ print(Url(scheme="https", hostname="bücher.example"))
 # https://xn--bcher-kva.example
 ```
 
-Decoding has two lossy corners:
-
-- a `%2F` inside a path segment is decoded like everything else and
-  therefore becomes a segment separator when rendering again;
-- percent escapes that are not valid UTF-8 (`%FF`) are replaced by the
-  Unicode replacement character.
-
-Hostnames are decoded and encoded too. Characters that cannot be part of a
-hostname are percent-encoded, so an assigned hostname can never spill over
-into the path or query:
+The decoded view is convenient but cannot tell everything apart: an
+escaped `/` (`%2F`, part of a segment) reads like a real one (a segment
+separator), and escapes that are not valid UTF-8 read as the replacement
+character. Where that matters, `raw_path` and `raw_fragment` give — and
+take — the encoded form:
 
 ```python
-print(Url(scheme="https", hostname="example.com/admin?x"))
-# https://example.com%2Fadmin%3Fx
+url = Url("https://example.com/files/a%2Fb.txt")
+print(url.path, "|", url.raw_path)
+# /files/a/b.txt | /files/a%2Fb.txt
+print(url.name)        # the last segment, split on real slashes
+# a/b.txt
+url.raw_path = "/files/c%2Fd.txt"
+print(url)
+# https://example.com/files/c%2Fd.txt
+url.path = "/files/100% c%2Fd"   # decoded: a "%" is a percent sign
+print(url)
+# https://example.com/files/100%25%20c%252Fd
+```
+
+Assigning the decoded value you just read (`url.path = url.path`)
+therefore re-encodes it and turns `%2F` into `/`.
+
+A path that would be read as something else is prefixed when rendering:
+a relative path with a `:` in its first segment gets a `./` (it would be a
+scheme), a path starting with `//` on a URL without a host a `/.` (it
+would be a host):
+
+```python
+print(Url(path="javascript:alert(1)"), "|", Url(path="//evil.example/x"))
+# ./javascript:alert(1) | /.//evil.example/x
 ```
 
 The IDNA encoding is the one of Python's standard library (IDNA 2003). It
@@ -487,3 +669,17 @@ print(str(url))
 print(repr(Url("redis://:secret@localhost:6379/0")))
 # Url(redis://:***@localhost:6379/0)
 ```
+
+The errors raised for an unparsable URL don't quote the password either:
+
+```python
+try:
+    Url("https://user:secret@example.com:port/")
+except ValueError as error:
+    print(error)
+# Port could not be cast to integer value as 'port'
+```
+
+Only the password part is redacted. A token given as *username*
+(`https://token@github.com/…`) or inside the query is shown by `repr()` —
+keep such URLs out of the logs yourself.

@@ -9,8 +9,10 @@ urllib.parse's methods.
 Requires Python 3.11 or newer.
 
 Full documentation including the API reference:
-<https://laughinjar.github.io/action0-url/> — what changed between
-releases is in the [changelog](CHANGELOG.md).
+<https://laughinjar.github.io/action0-url/>. The documentation — like this
+README — describes the `main` branch, which can be ahead of the latest
+release on PyPI; the [changelog](https://github.com/LaughInJar/action0-url/blob/main/CHANGELOG.md) lists
+what is released and what is not yet.
 
 ## Installation
 
@@ -77,6 +79,24 @@ print(Url("https://example.com:8443/old.html?a=1#top", path="/new.html", port=No
 # https://example.com/new.html#top
 ```
 
+Every part is validated when it is set — as keyword argument or by
+assigning to the attribute — so a `Url` can always be rendered:
+
+```python
+from action0.url import Url
+
+url = Url("https://example.com/")
+try:
+    url.hostname = "localhost:8080"   # the port is a part of its own
+except ValueError as error:
+    print(error)
+# Invalid hostname 'localhost:8080': a ':' is only allowed in an IPv6 address (pass a port as port=... or use authority=...)
+url.authority = "localhost:8080"
+url.fragment = None                   # None removes a part
+print(url)
+# https://localhost:8080/
+```
+
 Nothing is assumed about parts a URL string doesn't have, so relative
 references round-trip (a hostname is only recognized after `//`):
 
@@ -125,14 +145,16 @@ print(url)
 # https://example.com/?q=new
 ```
 
-Names, values (also blank ones) and their order survive parsing and
-re-rendering: `Params("a=&b=1&a=2").as_str()` is `"a=&b=1&a=2"` again.
-Only the spelling is normalized: a name without `=` gets one (`flag`
-becomes `flag=`), empty pairs (`a=1&&b=2`) are dropped and escapes are
-written in their canonical form (`%20` becomes `+`).
+Parameters that were parsed and not modified are rendered exactly as they
+were written — `Params("flag&q=a%20b&&x=1").as_str()` is that string
+again. Once modified they are written from the pairs (blank values and the
+order included) in a normalized spelling: a name without `=` gets one
+(`flag` becomes `flag=`), empty pairs are dropped and escapes are written
+in their canonical form (`%20` becomes `+`).
 
-Values that are not strings are converted (`True` becomes `"true"`, other
-objects go through `str()`); `None` and bytes raise a `TypeError`.
+Names are strings; values are strings, ints, floats and bools (`True`
+becomes `"true"`). Anything else — `None`, bytes, a date — raises a
+`TypeError`: convert it with `str()`.
 
 `Params` can also be used on its own, e.g. with a `;` separator as used
 for path parameters:
@@ -145,10 +167,11 @@ print(params.as_str())
 # foo=bar;a=b;a=c
 ```
 
-In a query a space is written as `+` (form encoding). That doesn't apply
-to path parameters, so `url.path_params` is created with
-`form_encoding=False`: a `+` is a literal plus sign there and a space is
-written as `%20`.
+In the query of a web URL a space is written as `+` (form encoding). That
+is a convention of the web: `url.query` is form-encoded for `http`,
+`https`, `ws`, `wss` and URLs without a scheme, while for every other
+scheme (`mailto:` …) and for `url.path_params` a `+` is a literal plus
+sign and a space is written as `%20` (`form_encoding=False`).
 
 ## Building and comparing URLs
 
@@ -180,11 +203,13 @@ ipv6 = Url("http://[::1]:8080/status")
 print(ipv6.hostname, "|", ipv6.authority, "|", ipv6)
 # ::1 | [::1]:8080 | http://[::1]:8080/status
 
-# equality compares the parts; query parameter order doesn't matter
+# equivalent URLs are equal; query parameter order doesn't matter
 print(Url("https://example.com?a=1&b=2") == Url("https://example.com?b=2&a=1"))
 # True
+print(Url("https://example.com/%7Eme") == Url("https://example.com/~me"))
+# True
 
-# repr() never leaks the password (str() / as_str() keep it)
+# repr() never shows the password (str() / as_str() keep it)
 print(repr(url))
 # Url(https://user:***@example.com:8443/index.html)
 
@@ -214,10 +239,15 @@ print(Url("https://example.com:443/a/./b/../c").normalize())
 print(Url("a/../../b").normalize())  # relative paths stay relative
 # ../b
 
-# parts are stored decoded, rendering percent-encodes them again ...
+# attributes show and take decoded values, rendering percent-encodes them ...
 url = Url("https://example.com/a%20b", fragment="§ 2")
 print(url.path, "|", url)
 # /a b | https://example.com/a%20b#%C2%A7%202
+
+# ... while a URL that is not modified is rendered exactly as it was written
+signed = "https://bucket.example/k%2Fey?X-Signature=ab%2Bc&flag"
+print(Url(signed).as_str() == signed, "|", Url(signed).path, "|", Url(signed).raw_path)
+# True | /k/ey | /k%2Fey
 
 # ... and non-ASCII hostnames become punycode
 print(Url(scheme="https", hostname="bücher.example"))
@@ -228,11 +258,12 @@ print(url.is_absolute(), Url("file:///etc/hosts").is_absolute(), Url("//example.
 # True True True
 ```
 
-Decoding has two lossy corners: a `%2F` inside a path segment becomes a
-plain `/`, and escapes that are not valid UTF-8 are replaced. Hostnames
-are IDNA-encoded with Python's standard library (IDNA 2003), which maps
-`straße.de` to `strasse.de` where current browsers keep the `ß` — assign
-the punycode form as hostname if that matters.
+The parts are kept percent-encoded internally; `raw_path` and
+`raw_fragment` give (and take) that form where the decoded view is not
+enough — an escaped `/` (`%2F`) looks like a real one in `url.path`.
+Hostnames are IDNA-encoded with Python's standard library (IDNA 2003),
+which maps `straße.de` to `strasse.de` where current browsers keep the
+`ß` — assign the punycode form as hostname if that matters.
 
 For debugging and stdlib interoperability there are also `url.as_dict()`
 (all parts as a plain dictionary) and `url.as_parse_result()` (the
@@ -253,8 +284,8 @@ uv run mypy          # type-check (also: uv run pyright, uv run ty check)
 uv run --group docs sphinx-build -W --keep-going -b html docs docs/_build/html
 ```
 
-User-visible changes are recorded in [CHANGELOG.md](CHANGELOG.md) under
-"Unreleased".
+User-visible changes are recorded in [CHANGELOG.md](https://github.com/LaughInJar/action0-url/blob/main/CHANGELOG.md)
+under "Unreleased".
 
 ### Releasing
 
@@ -262,12 +293,13 @@ The version lives only in `src/action0/url/__init__.py` (`__version__`).
 To release: bump it, turn the "Unreleased" section of the changelog into
 the new version, merge to `main`, then tag the release commit and push
 the tag — the release workflow re-runs all checks, verifies that the tag
-matches `__version__` and is on `main`, builds sdist + wheel, tests the
-built wheel and publishes to PyPI via trusted publishing:
+matches `__version__`, is on `main` and has a section in the changelog,
+builds sdist + wheel, tests the built wheel and publishes to PyPI via
+trusted publishing:
 
 ```shell
-git tag v0.1.0
-git push origin v0.1.0
+git tag vX.Y.Z      # the version in __init__.py, e.g. v0.2.0
+git push origin vX.Y.Z
 ```
 
 ## AI-assisted development

@@ -1,5 +1,9 @@
+import copy
 import datetime
 import decimal
+import enum
+import ipaddress
+import timeit
 import unittest
 import uuid
 from collections.abc import MutableMapping
@@ -606,8 +610,7 @@ class ParamsUnsupportedValuesTestCase(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "NoneType"):
             Params().add("a", cast(Any, ["1", None]))
         with self.assertRaisesRegex(TypeError, "NoneType"):
-            # MutableMapping.setdefault() defaults to None
-            cast(Any, Params()).setdefault("a")
+            Params().setdefault("a", cast(Any, None))
 
     def test_bytes_raise(self) -> None:
         """
@@ -628,31 +631,47 @@ class ParamsUnsupportedValuesTestCase(unittest.TestCase):
             params.add("a", cast(Any, ["2", None]))
         self.assertEqual(params.as_str(), "a=1")
 
-    def test_other_objects_are_stringified(self) -> None:
+    def test_other_objects_are_rejected(self) -> None:
         """
-        Test that non-iterable objects go through str() (regression: they
-        raised "object is not iterable").
+        Test that objects of other types are rejected with a hint instead
+        of being stringified or iterated behind the caller's back: what the
+        type hints promise is what is accepted.
         """
-        params = Params(
-            cast(
-                Any,
-                {
-                    "d": decimal.Decimal("1.50"),
-                    "t": datetime.date(2026, 1, 31),
-                    "u": uuid.UUID(int=1),
-                    "l": [decimal.Decimal("2"), 3],
-                },
-            )
-        )
-        self.assertEqual(
-            params.as_dict(),
-            {
-                "d": ["1.50"],
-                "t": ["2026-01-31"],
-                "u": ["00000000-0000-0000-0000-000000000001"],
-                "l": ["2", "3"],
-            },
-        )
+        values: list[Any] = [
+            decimal.Decimal("1.50"),
+            datetime.date(2026, 1, 31),
+            uuid.UUID(int=1),
+            {"x": 1},
+            ipaddress.ip_network("10.0.0.0/30"),
+            [["nested"]],
+            object(),
+        ]
+        for value in values:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(TypeError, r"convert other objects with str\(\)"):
+                    Params(cast(Any, {"a": value}))
+
+        self.assertEqual(Params({"d": str(decimal.Decimal("1.50"))}).as_str(), "d=1.50")
+
+    def test_enum_members_give_their_value(self) -> None:
+        """
+        Test that enum members that are strings or ints are stored as plain
+        values (regression: a (str, Enum) member was rendered as "E.X").
+        """
+
+        class Color(str, enum.Enum):
+            RED = "red"
+
+        class Level(int, enum.Enum):
+            HIGH = 3
+
+        class Mode(enum.StrEnum):
+            FAST = "fast"
+
+        params = Params(cast(Any, {"c": Color.RED, "l": Level.HIGH, "m": Mode.FAST}))
+        self.assertEqual(params.as_str(), "c=red&l=3&m=fast")
+        for value in params.as_dict().values():
+            self.assertIs(type(value[0]), str)
 
     def test_generator_of_values(self) -> None:
         """
@@ -739,7 +758,9 @@ class ParamsFormEncodingTestCase(unittest.TestCase):
         params = Params("a=1+2&b=3%204")
         self.assertTrue(params.form_encoding)
         self.assertEqual(params.as_dict(), {"a": ["1 2"], "b": ["3 4"]})
-        self.assertEqual(params.as_str(), "a=1+2&b=3+4")
+        # rendered from the pairs (here: because of the sorting), a space
+        # is written as "+"
+        self.assertEqual(params.as_str(sort=True), "a=1+2&b=3+4")
 
     def test_plus_is_literal_without_form_encoding(self) -> None:
         """
@@ -789,23 +810,36 @@ class ParamsNormalizationTestCase(unittest.TestCase):
 
     def test_key_without_equals_sign(self) -> None:
         """
-        Test that a key without "=" is kept and rendered with one.
+        Test that a key without "=" is kept, and rendered with one once the
+        parameters are modified.
         """
         params = Params("flag&x=1")
         self.assertEqual(params.as_dict(), {"flag": [""], "x": ["1"]})
-        self.assertEqual(params.as_str(), "flag=&x=1")
+        self.assertEqual(params.as_str(), "flag&x=1")
+        params.add("y", 2)
+        self.assertEqual(params.as_str(), "flag=&x=1&y=2")
 
     def test_empty_pairs_dropped(self) -> None:
         """
-        Test that empty pairs between separators are dropped.
+        Test that empty pairs between separators are no parameters and are
+        gone once the parameters are rendered from the pairs.
         """
-        self.assertEqual(Params("a=1&&b=2&").as_str(), "a=1&b=2")
+        params = Params("a=1&&b=2&")
+        self.assertEqual(len(params), 2)
+        self.assertEqual(params.as_str(), "a=1&&b=2&")
+        self.assertEqual(params.as_str(sort=True), "a=1&b=2")
 
     def test_escapes_canonicalized(self) -> None:
         """
-        Test that escapes are rewritten in their canonical form.
+        Test that escapes are written in their canonical form once the
+        parameters are rendered from the pairs.
         """
-        self.assertEqual(Params("q=a%20b&r=%7e").as_str(), "q=a+b&r=~")
+        params = Params("q=a%20b&r=%7e")
+        self.assertEqual(params.as_str(), "q=a%20b&r=%7e")
+        params.sort()
+        self.assertEqual(params.as_str(), "q=a%20b&r=%7e")  # already sorted: unchanged
+        params.add("s", 1)
+        self.assertEqual(params.as_str(), "q=a+b&r=~&s=1")
 
     def test_leading_question_mark_is_part_of_the_key(self) -> None:
         """
@@ -982,6 +1016,308 @@ class ParamsSortTestCase(unittest.TestCase):
         sorted_params.sort()
         self.assertEqual(sorted_params, params)
         self.assertEqual(Params(params.as_str(sort=True)), params)
+
+
+class ParamsInputValidationTestCase(unittest.TestCase):
+    """
+    tests for unsupported input given to
+    :py:class:`action0.url.params.Params`
+    """
+
+    def test_unsupported_params_type(self) -> None:
+        """
+        Test that something that is no parameter collection raises
+        (regression: ``Params(5)`` was silently empty).
+        """
+        for params in (5, 1.5, b"a=1", bytearray(b"a=1"), object()):
+            with self.subTest(params=params):
+                with self.assertRaisesRegex(TypeError, "params must be"):
+                    Params(cast(Any, params))
+        with self.assertRaises(TypeError):
+            Params("a=1").update(cast(Any, 5))
+
+    def test_items_have_to_be_pairs(self) -> None:
+        """
+        Test that an iterable of something else than pairs raises
+        (regression: ``Params(["ab", "cd"])`` became "a=b&c=d").
+        """
+        for params in (["ab", "cd"], [("a",)], [("a", "b", "c")], [1, 2], [b"ab"]):
+            with self.subTest(params=params):
+                with self.assertRaisesRegex(TypeError, "pairs"):
+                    Params(cast(Any, params))
+        pairs = cast(Any, [["a", "1"], ("b", ["2", "3"])])
+        self.assertEqual(Params(pairs).as_str(), "a=1&b=2&b=3")
+
+    def test_names_have_to_be_strings(self) -> None:
+        """
+        Test that non-string names raise (regression: they were stored as
+        they are, so that ``"1" in params`` was false).
+        """
+        for key in (1, None, b"a", 1.5):
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(TypeError, "names must be str"):
+                    Params(cast(Any, {key: "a"}))
+                with self.assertRaises(TypeError):
+                    Params().add(cast(Any, key), "a")
+                with self.assertRaises(TypeError):
+                    Params()[cast(Any, key)] = "a"
+        self.assertFalse(Params("a=1") == {1: "a"})
+
+    def test_separator_is_validated(self) -> None:
+        """
+        Test that only the two supported separators are accepted.
+        """
+        for separator in ("", ",", "&&", "&;", None):
+            with self.subTest(separator=separator):
+                with self.assertRaises(ValueError):
+                    Params("a=1", separator=cast(Any, separator))
+
+
+class ParamsVerbatimTestCase(unittest.TestCase):
+    """
+    tests that :py:class:`action0.url.params.Params` renders parsed
+    parameters as they were written until they are modified
+    """
+
+    def test_unmodified(self) -> None:
+        """
+        Test that a parsed string comes back exactly.
+        """
+        for params in ("flag", "a=1&&b=2&", "q=a%20b&r=%7e", "a+b=c+d", "a=b=c", "&", ""):
+            with self.subTest(params=params):
+                self.assertEqual(Params(params).as_str(), params)
+                self.assertEqual(str(Params(params)), params)
+
+    def test_characters_not_allowed_are_encoded(self) -> None:
+        """
+        Test that what cannot be part of a URL is encoded even if nothing
+        was modified.
+        """
+        self.assertEqual(Params("a b=c ä&x=100%").as_str(), "a%20b=c%20%C3%A4&x=100%25")
+        self.assertEqual(Params("a b=c ä&x=100%").as_dict(), {"a b": ["c ä"], "x": ["100%"]})
+        # in path params a "/" or "?" would end the path
+        self.assertEqual(
+            Params("a=b/c?d", separator=";", form_encoding=False).as_str(), "a=b%2Fc%3Fd"
+        )
+
+    def test_every_modification_switches_to_the_normalized_form(self) -> None:
+        """
+        Test all the ways to change the parameters.
+        """
+        modifications: dict[str, Any] = {
+            "add": lambda params: params.add("x", 1),
+            "set": lambda params: params.set("flag", "1"),
+            "setitem": lambda params: params.__setitem__("x", 1),
+            "delitem": lambda params: params.__delitem__("q"),
+            "remove": lambda params: params.remove("q"),
+            "update": lambda params: params.update(x=1),
+            "pop": lambda params: params.pop("q"),
+            "popitem": lambda params: params.popitem(),
+            "setdefault": lambda params: params.setdefault("x", 1),
+            "clear": lambda params: params.clear(),
+            "sort": lambda params: params.sort(),
+        }
+        for name, modify in modifications.items():
+            with self.subTest(modification=name):
+                params = Params("q=a%20b&flag")
+                modify(params)
+                self.assertNotIn("%20", params.as_str())
+                self.assertEqual(Params(params.as_str()), params)
+
+    def test_changes_without_effect_keep_the_original(self) -> None:
+        """
+        Test that operations that change nothing don't change the spelling.
+        """
+        params = Params("a=%20&flag")
+        params.remove("missing")
+        params.remove("a", "other")
+        params.add("x", [])
+        params.set("flag", "")
+        params.update({})
+        params.setdefault("a", "z")
+        params.sort()
+        self.assertEqual(params.as_str(), "a=%20&flag")
+
+    def test_copies_keep_the_original(self) -> None:
+        """
+        Test that a copy renders like the original, as long as it has the
+        same separator and encoding.
+        """
+        params = Params("a=%20&flag")
+        self.assertEqual(Params(params).as_str(), "a=%20&flag")
+        self.assertEqual(params.copy().as_str(), "a=%20&flag")
+        self.assertEqual(Params(params, separator=";").as_str(), "a=+;flag=")
+        self.assertEqual(Params(params, form_encoding=False).as_str(), "a=%20&flag=")
+
+    def test_changed_settings_render_from_the_pairs(self) -> None:
+        """
+        Test that changing separator or encoding of an instance is honored.
+        """
+        params = Params("a=1+2&b=3")
+        params.separator = ";"
+        self.assertEqual(params.as_str(), "a=1+2;b=3")
+        params.form_encoding = False
+        self.assertEqual(params.as_str(), "a=1%202;b=3")
+        params.separator = "&"
+        params.form_encoding = True
+        self.assertEqual(params.as_str(), "a=1+2&b=3")
+
+
+class ParamsCopyTestCase(unittest.TestCase):
+    """
+    tests for copying :py:class:`action0.url.params.Params`
+    """
+
+    def test_copy_is_independent(self) -> None:
+        """
+        Test copy() and copy.copy() (regression: a shallow copy shared the
+        list of pairs).
+        """
+        params = Params("a=1", separator=";", form_encoding=False)
+        for copied in (params.copy(), copy.copy(params), copy.deepcopy(params)):
+            with self.subTest(copied=copied):
+                self.assertEqual(copied, params)
+                self.assertEqual(copied.separator, ";")
+                self.assertFalse(copied.form_encoding)
+                copied.add("b", 2)
+                self.assertEqual(params.as_str(), "a=1")
+                self.assertEqual(copied.as_str(), "a=1;b=2")
+
+    def test_copy_keeps_the_class(self) -> None:
+        """
+        Test that copy() returns an instance of the subclass.
+        """
+
+        class MyParams(Params):
+            pass
+
+        self.assertIsInstance(MyParams("a=1").copy(), MyParams)
+
+
+class ParamsMappingConsistencyTestCase(unittest.TestCase):
+    """
+    tests for the mapping behaviour of :py:class:`action0.url.params.Params`
+    beyond the basics
+    """
+
+    def test_view_follows_every_change(self) -> None:
+        """
+        Test that the (cached) mapping view is never stale.
+        """
+        params = Params("b=2&a=1&a=3")
+        self.assertEqual(dict(params), {"b": "2", "a": "3"})
+        params.add("a", 4)
+        self.assertEqual(params["a"], "4")
+        params.remove("a", "4")
+        self.assertEqual(params["a"], "3")
+        params.set("c", ["x", "y"])
+        self.assertEqual(list(params.items()), [("b", "2"), ("a", "3"), ("c", "y")])
+        del params["b"]
+        self.assertNotIn("b", params)
+        self.assertEqual(len(params), 2)
+        params.update("a=9", d=1)
+        self.assertEqual(list(params), ["a", "c", "d"])
+        self.assertEqual(params.pop("c"), "y")
+        self.assertEqual(list(params.values()), ["9", "1"])
+        params.sort()
+        self.assertEqual(params.singles(), {"a": "9", "d": "1"})
+        params.clear()
+        self.assertEqual(len(params), 0)
+        self.assertNotIn("a", params)
+
+    def test_singles_returns_a_copy(self) -> None:
+        """
+        Test that the dictionary of singles() can be modified freely.
+        """
+        params = Params("a=1")
+        params.singles()["b"] = "2"
+        self.assertNotIn("b", params)
+
+    def test_changing_while_iterating(self) -> None:
+        """
+        Test that the parameters can be changed while iterating over them.
+        """
+        params = Params("a=1&b=2&c=3")
+        for key in params:
+            params.add(f"{key}{key}", 0)
+            del params[key]
+        self.assertEqual(params.as_str(), "aa=0&bb=0&cc=0")
+
+    def test_setdefault(self) -> None:
+        """
+        Test that setdefault() returns what is stored (regression: it
+        returned the default as it was given, e.g. the int 5).
+        """
+        params = Params("a=1")
+        self.assertEqual(params.setdefault("a", "z"), "1")
+        self.assertEqual(params.setdefault("b", 5), "5")
+        self.assertEqual(params.setdefault("c", ["x", "y"]), "y")
+        self.assertEqual(params.as_str(), "a=1&b=5&c=x&c=y")
+        with self.assertRaises(ValueError):
+            params.setdefault("d", [])
+        self.assertNotIn("d", params)
+
+    def test_update_is_all_or_nothing(self) -> None:
+        """
+        Test that a rejected update changes nothing (regression:
+        ``update(x=1, y=None)`` raised but had set x).
+        """
+        params = Params("a=1")
+        with self.assertRaises(TypeError):
+            params.update(x=1, y=cast(Any, None))
+        with self.assertRaises(TypeError):
+            params.update(cast(Any, [("x", 1), ("y", None)]))
+        self.assertEqual(params.as_str(), "a=1")
+
+    def test_update_keyword_wins_over_positional(self) -> None:
+        """
+        Test that, like for a dict, a keyword argument overrides the same
+        name of the positional argument.
+        """
+        params = Params("a=1&b=2")
+        params.update({"b": "x", "c": "y"}, c="z", d="w")
+        self.assertEqual(params.as_str(), "a=1&b=x&c=z&d=w")
+
+    def test_empty_values_remove_the_name(self) -> None:
+        """
+        Test the documented special case of the mapping contract: an empty
+        list of values removes the name.
+        """
+        params = Params("a=1&b=2")
+        params["a"] = []
+        self.assertNotIn("a", params)
+        params.update({"b": []})
+        self.assertEqual(len(params), 0)
+
+
+class ParamsScalingTestCase(unittest.TestCase):
+    """
+    tests that :py:class:`action0.url.params.Params` copes with large
+    (possibly hostile) inputs
+    """
+
+    def test_mapping_operations_are_linear(self) -> None:
+        """
+        Test that reading and merging many parameters does not take
+        quadratic time (regression: dict() of 30,000 parameters took 5 s,
+        update() of 10,000 took 4.5 s).
+        """
+        count = 50_000
+        params = Params([(f"k{index}", "v") for index in range(count)])
+        other = Params([(f"k{index}", "w") for index in range(0, 2 * count, 2)])
+
+        def work() -> None:
+            self.assertEqual(len(dict(params)), count)
+            self.assertEqual(len(list(params.values())), count)
+            self.assertEqual(sum(key in params for key in other), count // 2)
+            merged = params.copy()
+            merged.update(other)
+            self.assertEqual(len(merged), count + count // 2)
+            self.assertEqual(merged["k0"], "w")
+            self.assertEqual(merged["k1"], "v")
+
+        # takes well under a second when linear, minutes when quadratic
+        self.assertLess(timeit.timeit(work, number=1), 20)
 
 
 if __name__ == "__main__":

@@ -1,3 +1,5 @@
+import copy
+import pickle
 import unittest
 from typing import Any
 from typing import cast
@@ -732,7 +734,7 @@ class UrlCopyTestCase(unittest.TestCase):
         Test that an unknown part name raises a TypeError.
         """
         with self.assertRaises(TypeError):
-            Url("https://example.com").copy(nonsense="x")
+            cast(Any, Url("https://example.com")).copy(nonsense="x")
 
     def test_copy_rejects_base_url(self) -> None:
         """
@@ -740,7 +742,7 @@ class UrlCopyTestCase(unittest.TestCase):
         (regression: it was merged part by part with the copied URL).
         """
         with self.assertRaises(TypeError):
-            Url("https://example.com/a").copy(url="http://other.org/b")
+            cast(Any, Url("https://example.com/a")).copy(url="http://other.org/b")
 
     def test_copy_removes_parts(self) -> None:
         """
@@ -912,12 +914,13 @@ class UrlEncodingTestCase(unittest.TestCase):
 
     def test_hostname_cannot_inject_other_parts(self) -> None:
         """
-        Test that delimiters in a hostname are encoded instead of starting
-        a path or query (regression: the hostname was emitted verbatim).
+        Test that a hostname with URL delimiters is rejected instead of
+        starting a path or query (regression: it was emitted verbatim).
         """
-        url = Url(scheme="https", hostname="evil.com/x?y#z")
-        self.assertEqual(url.as_str(), "https://evil.com%2Fx%3Fy%23z")
-        self.assertEqual(Url(url.as_str()).path, "")
+        for hostname in ("evil.com/x", "evil.com?y", "evil.com#z", "user@evil.com", "a b", "a\\b"):
+            with self.subTest(hostname=hostname):
+                with self.assertRaises(ValueError):
+                    Url(scheme="https", hostname=hostname)
 
     def test_non_utf8_escapes_are_replaced(self) -> None:
         """
@@ -1170,14 +1173,22 @@ class UrlParamsAssignmentTestCase(unittest.TestCase):
 
     def test_assign_query_params_instance(self) -> None:
         """
-        Test that an assigned Params instance is used as it is.
+        Test that an assigned Params instance is copied, never shared
+        (regression: a "fitting" instance was used as it is, so that
+        ``b.query = a.query`` tied two Urls together).
         """
         url = Url("https://example.com/")
         params = Params("a=1")
         url.query = params
-        self.assertIs(url.query, params)
+        self.assertIsNot(url.query, params)
         params.add("b", 2)
-        self.assertEqual(url.as_str(), "https://example.com/?a=1&b=2")
+        self.assertEqual(url.as_str(), "https://example.com/?a=1")
+
+        other = Url("https://other.example/")
+        other.query = url.query
+        other.query.add("c", 3)
+        self.assertEqual(url.as_str(), "https://example.com/?a=1")
+        self.assertEqual(other.as_str(), "https://other.example/?a=1&c=3")
 
     def test_assign_path_params(self) -> None:
         """
@@ -1207,6 +1218,969 @@ class UrlParamsAssignmentTestCase(unittest.TestCase):
         url = Url("https://example.com/", query=params)
         params.add("b", 2)
         self.assertEqual(url.as_str(), "https://example.com/?a=1")
+
+
+class UrlHazardousPathTestCase(unittest.TestCase):
+    """
+    tests for paths that would be read as another part of the URL when it
+    is parsed again, see :py:meth:`action0.url.base.Url.as_str`
+    """
+
+    def test_colon_in_first_relative_segment(self) -> None:
+        """
+        Test that a relative path cannot be mistaken for a scheme
+        (regression: ``Url(path="javascript:alert(1)")`` rendered as a
+        URL with the scheme "javascript").
+        """
+        url = Url(path="javascript:alert(1)")
+        self.assertEqual(url.as_str(), "./javascript:alert(1)")
+        self.assertEqual(Url(url.as_str()).scheme, "")
+        self.assertEqual(Url(url.as_str()), url)
+
+        self.assertEqual((Url() / "a:b").as_str(), "./a:b")
+        # normalizing does not strip the protection again
+        self.assertEqual(Url("./a:b").normalize().as_str(), "./a:b")
+        self.assertEqual(Url("x/../y:z").normalize().as_str(), "./y:z")
+
+    def test_colon_is_fine_elsewhere(self) -> None:
+        """
+        Test that the prefix is only added where the colon is ambiguous.
+        """
+        for url_str in ("a/b:c", "/a:b", "https://example.com/a:b", "//example.com/a:b", "x:a:b"):
+            with self.subTest(url=url_str):
+                self.assertEqual(Url(url_str).as_str(), url_str)
+        url = Url(scheme="https", hostname="example.com", path="a:b")
+        self.assertEqual(url.as_str(), "https://example.com/a:b")
+
+    def test_double_slash_without_host(self) -> None:
+        """
+        Test that a path starting with "//" cannot be mistaken for a host
+        (regression: ``join("..//evil.com/x")`` gave a path a browser reads
+        as the host evil.com).
+        """
+        cases = [
+            Url(path="//evil.com/x"),
+            Url("/app/page").join("..//evil.com/x"),
+            Url("/a/..//evil.com/x").normalize(),
+        ]
+        for url in cases:
+            with self.subTest(url=url):
+                self.assertEqual(url.as_str(), "/.//evil.com/x")
+                self.assertIsNone(Url(url.as_str()).hostname)
+                self.assertEqual(Url(url.as_str()), url)
+
+        url = Url(scheme="https", path="//evil.com/x")
+        self.assertEqual(url.as_str(), "https:/.//evil.com/x")
+        self.assertIsNone(Url(url.as_str()).hostname)
+
+    def test_double_slash_behind_a_host_is_kept(self) -> None:
+        """
+        Test that empty segments behind a host are left alone.
+        """
+        self.assertEqual(Url("https://example.com//a//b").as_str(), "https://example.com//a//b")
+
+    def test_path_params_without_path_behind_a_host(self) -> None:
+        """
+        Test that path params cannot run into the host.
+        """
+        url = Url("https://example.com", path_params="v=1")
+        self.assertEqual(url.as_str(), "https://example.com/;v=1")
+        self.assertEqual(Url(url.as_str()).hostname, "example.com")
+
+
+class UrlValidationTestCase(unittest.TestCase):
+    """
+    tests for the validation when assigning the parts of
+    :py:class:`action0.url.base.Url` (attributes, keyword arguments, copy())
+    """
+
+    def test_scheme(self) -> None:
+        """
+        Test that a scheme is validated and lowercased (regression:
+        ``scheme="https://evil.com/?"`` rewrote the whole URL).
+        """
+        for scheme in ("https://", "https://evil.com/?", "my scheme", "1abc", "a_b", ":"):
+            with self.subTest(scheme=scheme):
+                with self.assertRaises(ValueError):
+                    Url("http://example.com/x", scheme=scheme)
+                with self.assertRaises(ValueError):
+                    Url("http://example.com/x").scheme = scheme
+
+        url = Url(scheme="HTTPS", hostname="example.com")
+        self.assertEqual(url.scheme, "https")
+        url.scheme = "Git+SSH"
+        self.assertEqual(url.scheme, "git+ssh")
+
+    def test_uppercase_scheme_keeps_semicolon_escaping(self) -> None:
+        """
+        Test the regression that a non-lowercase scheme let a ";" of the
+        path spill into the path params.
+        """
+        url = Url(scheme="HTTPS", hostname="example.com", path="/a;b=1")
+        self.assertEqual(url.as_str(), "https://example.com/a%3Bb=1")
+        self.assertEqual(Url(url.as_str()).path, "/a;b=1")
+        self.assertEqual(Url(url.as_str()), url)
+
+    def test_hostname_with_port(self) -> None:
+        """
+        Test that a hostname with a port is rejected with a hint
+        (regression: "localhost:8080" was rendered as "[localhost:8080]").
+        """
+        with self.assertRaisesRegex(ValueError, "port="):
+            Url(scheme="http", hostname="localhost:8080")
+        with self.assertRaises(ValueError):
+            Url("http://example.com/").hostname = "example.com:8080"
+        # a URL that hides the colon cannot be parsed either
+        with self.assertRaises(ValueError):
+            Url("http://example.com%3A8080/")
+        self.assertEqual(Url(scheme="http", authority="localhost:8080").port, 8080)
+
+    def test_hostname_invalid(self) -> None:
+        """
+        Test that hostnames with impossible content are rejected.
+        """
+        for hostname in ("[zz]", "[::1", "::1]", "1:2", " example.com", "exa mple.com", "a\tb"):
+            with self.subTest(hostname=hostname):
+                with self.assertRaises(ValueError):
+                    Url(scheme="http", hostname=hostname)
+
+    def test_hostname_idna_checked_on_assignment(self) -> None:
+        """
+        Test that a hostname that cannot be IDNA-encoded is rejected when
+        it is assigned, not when the URL is rendered (regression: str() and
+        even repr() raised later on).
+        """
+        for hostname in ("bü..de", "ü" * 70 + ".de"):
+            with self.subTest(hostname=hostname):
+                with self.assertRaises(ValueError):
+                    Url(scheme="https", hostname=hostname)
+        url = Url("https://example.com/")
+        with self.assertRaises(ValueError):
+            url.hostname = "bü..de"
+        self.assertEqual(repr(url), "Url(https://example.com/)")
+
+    def test_hostname_is_lowercased(self) -> None:
+        """
+        Test that hostnames are case-insensitive: stored in lowercase.
+        """
+        url = Url(scheme="https", hostname="EXAMPLE.Com")
+        self.assertEqual(url.hostname, "example.com")
+        url.authority = "Other.ORG:8443"
+        self.assertEqual(url.hostname, "other.org")
+        self.assertEqual(Url(scheme="https", hostname="BÜCHER.example").hostname, "bücher.example")
+
+    def test_port(self) -> None:
+        """
+        Test that a port has to be an int in the valid range.
+        """
+        for port in (-1, 65536, 99999):
+            with self.subTest(port=port):
+                with self.assertRaises(ValueError):
+                    Url(scheme="http", hostname="example.com", port=port)
+        for no_port in ("8080", "80/evil", True, 80.0):
+            with self.subTest(port=no_port):
+                with self.assertRaises(TypeError):
+                    Url(scheme="http", hostname="example.com", port=cast(Any, no_port))
+        url = Url("http://example.com:8080/")
+        with self.assertRaises(ValueError):
+            url.port = 70000
+        self.assertEqual(url.port, 8080)
+        url.port = 65535
+        self.assertEqual(url.as_str(), "http://example.com:65535/")
+
+    def test_authority_is_strict(self) -> None:
+        """
+        Test that everything that is not "hostname[:port]" is rejected.
+        """
+        invalid = [
+            "h:99999",
+            "example.com/path",
+            " example.com",
+            "[not-ipv6]:80",
+            "[zz]",
+            "::1]:80",
+            "h:80:90",
+            "example.com:port",
+        ]
+        for authority in invalid:
+            with self.subTest(authority=authority):
+                with self.assertRaises(ValueError):
+                    Url(scheme="http", authority=authority)
+
+    def test_authority_assignment_is_all_or_nothing(self) -> None:
+        """
+        Test that a rejected authority changes neither hostname nor port.
+        """
+        url = Url("http://example.com:8080/")
+        with self.assertRaises(ValueError):
+            url.authority = "other.org:99999"
+        self.assertEqual(url.as_str(), "http://example.com:8080/")
+
+    def test_none_removes_parts(self) -> None:
+        """
+        Test that None can be assigned to every part (regression: for path,
+        fragment, scheme and authority it broke rendering).
+        """
+        url = Url("https://user:pass@example.com:8443/path;v=1?a=1#frag")
+        url.fragment = None
+        url.path = None
+        url.path_params = None
+        url.query = None
+        url.username = None
+        url.password = None
+        self.assertEqual(url.as_str(), "https://example.com:8443")
+        url.authority = None
+        self.assertIsNone(url.hostname)
+        self.assertIsNone(url.port)
+        url.scheme = None
+        self.assertEqual(url.as_str(), "")
+        self.assertEqual(url, Url())
+
+    def test_empty_string_is_none_for_optional_parts(self) -> None:
+        """
+        Test that "" and None mean the same for the parts that can be
+        missing (regression: ``url.username = ""`` made a Url unequal to
+        its own copy).
+        """
+        url = Url("https://user:pass@example.com/")
+        url.username = ""
+        url.password = ""
+        self.assertIsNone(url.username)
+        self.assertIsNone(url.password)
+        self.assertEqual(url, url.copy())
+
+    def test_wrong_types(self) -> None:
+        """
+        Test that values of the wrong type raise a TypeError right away
+        (regression: ``query=5`` silently removed the query).
+        """
+        for part in ("scheme", "hostname", "path", "fragment", "username", "password"):
+            with self.subTest(part=part):
+                with self.assertRaises(TypeError):
+                    Url("https://example.com/", **{part: cast(Any, 5)})
+                with self.assertRaises(TypeError):
+                    setattr(Url("https://example.com/"), part, 5)
+        with self.assertRaises(TypeError):
+            Url("https://example.com/?a=1", query=cast(Any, 5))
+        with self.assertRaises(TypeError):
+            Url("https://example.com/").path_params = cast(Any, 5)
+
+    def test_wrong_url_type(self) -> None:
+        """
+        Test that the base url has to be a string (regression: a Url or
+        bytes failed deep inside urllib).
+        """
+        for url in (b"https://example.com/", Url("https://example.com/"), 123):
+            with self.subTest(url=url):
+                with self.assertRaisesRegex(TypeError, "url must be a str"):
+                    Url(cast(Any, url))
+
+    def test_unknown_attribute(self) -> None:
+        """
+        Test that a misspelled attribute raises (regression:
+        ``url.host = ...`` silently did nothing).
+        """
+        url = Url("https://example.com/")
+        with self.assertRaises(AttributeError):
+            cast(Any, url).host = "evil.example"
+
+    def test_copy_validates(self) -> None:
+        """
+        Test that the replacements of copy() are validated like assignments.
+        """
+        url = Url("https://example.com/")
+        with self.assertRaises(ValueError):
+            url.copy(hostname="a/b")
+        with self.assertRaises(ValueError):
+            url.copy(port=-1)
+        with self.assertRaises(ValueError):
+            url.copy(authority="example.com", port=1)
+
+
+class UrlRawPartsTestCase(unittest.TestCase):
+    """
+    tests for the encoded form the parts of
+    :py:class:`action0.url.base.Url` are kept in
+    """
+
+    def test_escaped_reserved_characters_round_trip(self) -> None:
+        """
+        Test that escapes of reserved characters are not lost (regression:
+        "%2B" came back as "+", which S3 reads as a space, "%2F" as "/").
+        """
+        url_str = "https://u%21%24:p%26%3D@example.com/a%2Bb%3D%26%3A%40%2C%2F.txt#%2F%3F%3D"
+        url = Url(url_str)
+        self.assertEqual(url.as_str(), url_str)
+        self.assertEqual(url.path, "/a+b=&:@,/.txt")
+        self.assertEqual(url.raw_path, "/a%2Bb%3D%26%3A%40%2C%2F.txt")
+        self.assertEqual(url.username, "u!$")
+        self.assertEqual(url.password, "p&=")
+        self.assertEqual(url.fragment, "/?=")
+        self.assertEqual(url.raw_fragment, "%2F%3F%3D")
+
+    def test_invalid_utf8_escapes_round_trip(self) -> None:
+        """
+        Test that escapes that are not valid UTF-8 survive, although the
+        decoded attribute can only show a replacement character.
+        """
+        url = Url("https://example.com/a%FFb")
+        self.assertEqual(url.as_str(), "https://example.com/a%FFb")
+        self.assertEqual(url.path, "/a�b")
+
+    def test_signed_url_round_trip(self) -> None:
+        """
+        Test that a URL whose exact spelling matters is not touched.
+        """
+        url_str = (
+            "https://bucket.s3.amazonaws.com/k%2Fey%20x?X-Amz-Signature=ab%2Bc%2f"
+            "&X-Amz-Date=20260131T000000Z&flag&a=b=c&&"
+        )
+        self.assertEqual(Url(url_str).as_str(), url_str)
+        self.assertEqual(Url(url_str).copy().as_str(), url_str)
+
+    def test_characters_not_allowed_in_a_url_are_encoded(self) -> None:
+        """
+        Test that the only repairs of a parsed URL are the ones it needs
+        to be a URL: spaces, non-ASCII characters and a stray "%".
+        """
+        url = Url("https://example.com/a b/ä/100%?q=a b&x=ä%#f g%")
+        self.assertEqual(
+            url.as_str(), "https://example.com/a%20b/%C3%A4/100%25?q=a%20b&x=%C3%A4%25#f%20g%25"
+        )
+        self.assertEqual(url.path, "/a b/ä/100%")
+        self.assertEqual(url.query["q"], "a b")
+        self.assertEqual(url.query["x"], "ä%")
+
+    def test_assigning_path_encodes(self) -> None:
+        """
+        Test that the path attribute takes a decoded value: a "%" is a
+        percent sign, not the start of an escape.
+        """
+        url = Url("https://example.com/")
+        url.path = "/a b/c%2Fd"
+        self.assertEqual(url.raw_path, "/a%20b/c%252Fd")
+        self.assertEqual(url.path, "/a b/c%2Fd")
+
+    def test_assigning_raw_path_keeps_escapes(self) -> None:
+        """
+        Test that raw_path takes an encoded value and only encodes what
+        cannot be raw in a path.
+        """
+        url = Url("https://example.com/")
+        url.raw_path = "/a%2Fb c/ä?x#y"
+        self.assertEqual(url.raw_path, "/a%2Fb%20c/%C3%A4%3Fx%23y")
+        self.assertEqual(url.path, "/a/b c/ä?x#y")
+        self.assertEqual(url.as_str(), "https://example.com/a%2Fb%20c/%C3%A4%3Fx%23y")
+        self.assertEqual(Url(url.as_str()), url)
+
+        url.raw_fragment = "a%2Fb c"
+        self.assertEqual(url.raw_fragment, "a%2Fb%20c")
+        self.assertEqual(url.fragment, "a/b c")
+
+    def test_name_is_one_segment(self) -> None:
+        """
+        Test that the name is split on real slashes only and that a "/" in
+        an assigned name is encoded.
+        """
+        url = Url("https://example.com/dir/a%2Fb.txt")
+        self.assertEqual(url.name, "a/b.txt")
+        self.assertEqual(url.suffix, ".txt")
+        self.assertEqual(url.parent.as_str(), "https://example.com/dir")
+        url.name = "x/y z.txt"
+        self.assertEqual(url.as_str(), "https://example.com/dir/x%2Fy%20z.txt")
+
+    def test_equality_of_escapes(self) -> None:
+        """
+        Test that only equivalent spellings are equal (RFC 3986, 6.2.2):
+        escapes of unreserved characters and the case of the hex digits
+        don't matter, escaped reserved characters do.
+        """
+        self.assertEqual(Url("https://example.com/%7Euser"), Url("https://example.com/~user"))
+        self.assertEqual(Url("https://example.com/a%c3%a4"), Url("https://example.com/a%C3%A4"))
+        self.assertEqual(
+            Url("https://example.com/a%20b"),
+            Url(scheme="https", hostname="example.com", path="/a b"),
+        )
+        self.assertNotEqual(Url("https://example.com/a%2Fb"), Url("https://example.com/a/b"))
+        self.assertNotEqual(Url("https://example.com/a%3Fb"), Url("https://example.com/a?b"))
+        self.assertEqual(Url("https://u%7E@example.com/#%7E"), Url("https://u~@example.com/#~"))
+
+    def test_normalize_canonicalizes_escapes(self) -> None:
+        """
+        Test that normalize() brings escapes into their canonical form.
+        """
+        url = Url("https://example.com/%7euser/a%2fb/%c3%a4#%7e").normalize()
+        self.assertEqual(url.as_str(), "https://example.com/~user/a%2Fb/%C3%A4#~")
+
+    def test_escaped_slash_is_no_segment_separator(self) -> None:
+        """
+        Test that an escaped "/" takes no part in resolving dot segments
+        (regression: "/a%2F..%2Fb" was normalized to "/b").
+        """
+        url = Url("http://example.com/a%2F..%2Fb")
+        self.assertEqual(url.normalize().as_str(), "http://example.com/a%2F..%2Fb")
+        self.assertEqual(
+            Url("http://example.com/b/c/d").join("a%2F..%2Fb").as_str(),
+            "http://example.com/b/c/a%2F..%2Fb",
+        )
+        # an escaped dot segment is a dot segment
+        self.assertEqual(Url("http://example.com/a/%2E%2e/b").normalize().path, "/b")
+
+
+class UrlQueryEncodingTestCase(unittest.TestCase):
+    """
+    tests for how :py:class:`action0.url.base.Url` reads and writes its query
+    """
+
+    def test_unmodified_query_is_kept(self) -> None:
+        """
+        Test that the query is rendered as it was written (regression:
+        "?foo+bar" became "?foo+bar=", "%20" became "+").
+        """
+        for query in ("foo+bar", "flag&a=1", "q=a%20b", "a=1&&b=2&", "r=https://x/y?z", "a=b=c"):
+            with self.subTest(query=query):
+                url_str = f"https://example.com/search?{query}"
+                self.assertEqual(Url(url_str).as_str(), url_str)
+
+    def test_modified_query_is_normalized(self) -> None:
+        """
+        Test that the query is written from its pairs once it was modified.
+        """
+        url = Url("https://example.com/?flag&q=a%20b&&x=1")
+        url.query.add("y", 2)
+        self.assertEqual(url.as_str(), "https://example.com/?flag=&q=a+b&x=1&y=2")
+
+    def test_reading_does_not_modify(self) -> None:
+        """
+        Test that reading the parameters keeps the original spelling.
+        """
+        url_str = "https://example.com/?flag&q=a%20b"
+        url = Url(url_str)
+        self.assertEqual(url.query["q"], "a b")
+        self.assertEqual(dict(url.query), {"flag": "", "q": "a b"})
+        self.assertEqual(url.query.remove("missing"), [])
+        self.assertEqual(url.as_str(), url_str)
+
+    def test_form_encoding_for_web_schemes(self) -> None:
+        """
+        Test that a "+" is a space for the web schemes and for URLs
+        without a scheme.
+        """
+        for url_str in (
+            "https://h/?q=a+b",
+            "http://h/?q=a+b",
+            "wss://h/?q=a+b",
+            "//h/?q=a+b",
+            "?q=a+b",
+        ):
+            with self.subTest(url=url_str):
+                url = Url(url_str)
+                self.assertTrue(url.query.form_encoding)
+                self.assertEqual(url.query["q"], "a b")
+
+    def test_no_form_encoding_for_other_schemes(self) -> None:
+        """
+        Test that a "+" is a plus sign elsewhere (regression: the body of
+        "mailto:a@b.com?body=1+1=2" was read as "1 1=2").
+        """
+        url_str = "mailto:a@b.com?subject=Hello%20World&body=1+1=2"
+        url = Url(url_str)
+        self.assertFalse(url.query.form_encoding)
+        self.assertEqual(url.query["body"], "1+1=2")
+        self.assertEqual(url.query["subject"], "Hello World")
+        self.assertEqual(url.as_str(), url_str)
+
+        url.query.add("cc", "x y+z")
+        self.assertEqual(
+            url.as_str(), "mailto:a@b.com?subject=Hello%20World&body=1+1%3D2&cc=x%20y+z"
+        )
+        self.assertEqual(Url("myapp://open?q=a+b").query["q"], "a+b")
+
+    def test_scheme_argument_decides(self) -> None:
+        """
+        Test that a scheme given as keyword argument decides how a base
+        url without a scheme is read, and how assigned queries are written.
+        """
+        self.assertEqual(Url("?q=a+b", scheme="mailto").query["q"], "a+b")
+        self.assertEqual(Url("?q=a+b", scheme="https").query["q"], "a b")
+        self.assertEqual(
+            Url(scheme="myapp", hostname="h", query={"q": "a b"}).as_str(), "myapp://h?q=a%20b"
+        )
+        self.assertEqual(
+            Url(scheme="https", hostname="h", query={"q": "a b"}).as_str(), "https://h?q=a+b"
+        )
+
+    def test_form_encoding_can_be_overridden(self) -> None:
+        """
+        Test that the Params attribute overrides what the scheme implies.
+        """
+        url = Url("myapp://open?q=a+b")
+        url.query.form_encoding = True
+        self.assertEqual(url.as_str(), "myapp://open?q=a%2Bb")
+        self.assertEqual(url.copy().query.form_encoding, True)
+
+    def test_equality_ignores_query_spelling(self) -> None:
+        """
+        Test that queries are compared by their parameters.
+        """
+        self.assertEqual(Url("https://h/?a=%20&flag"), Url("https://h/?flag=&a=+"))
+
+
+class UrlJoinEdgeCasesTestCase(unittest.TestCase):
+    """
+    more tests for :py:meth:`action0.url.base.Url.join`
+    """
+
+    def test_semicolon_for_schemes_without_path_params(self) -> None:
+        """
+        Test that the reference is read in the context of the base URL
+        (regression: "report;final.txt" joined onto a file URL lost
+        ";final.txt" from the path).
+        """
+        url = Url("file:///a/b").join("report;final.txt")
+        self.assertEqual(url.as_str(), "file:///a/report;final.txt")
+        self.assertEqual(url.path, "/a/report;final.txt")
+        self.assertEqual(url.name, "report;final.txt")
+        self.assertEqual(Url(url.as_str()), url)
+        self.assertEqual(Url("s3://bucket/dir/").join("key;v1").as_str(), "s3://bucket/dir/key;v1")
+
+        url = Url("/a/report;final.txt", scheme="file")
+        self.assertEqual(url.path, "/a/report;final.txt")
+        self.assertEqual(url.as_str(), "file:///a/report;final.txt")
+
+    def test_empty_query_reference_clears_the_query(self) -> None:
+        """
+        Test that "?" replaces the query with an empty one, like in
+        browsers (regression: the query of the base URL was kept).
+        """
+        base = Url("http://example.com/list?filter=x#top")
+        self.assertEqual(base.join("?").as_str(), "http://example.com/list")
+        self.assertEqual(base.join("?#x").as_str(), "http://example.com/list#x")
+        self.assertEqual(base.join("#x").as_str(), "http://example.com/list?filter=x#x")
+        # the fragment is the one of the reference: none
+        self.assertEqual(base.join("").as_str(), "http://example.com/list?filter=x")
+        self.assertEqual(base.join("#").as_str(), "http://example.com/list?filter=x")
+
+    def test_strict_resolution(self) -> None:
+        """
+        Test the cases where RFC 3986 and urllib's urljoin differ: a
+        reference with a scheme is never treated as relative.
+        """
+        self.assertEqual(Url("http://a/b/c/d").join("http:g").as_str(), "http:g")
+        self.assertEqual(Url("http://a/b/c/d").join("g//h").as_str(), "http://a/b/c/g//h")
+
+    def test_rootless_base(self) -> None:
+        """
+        Test bases with a scheme but without a "/" in their path: the
+        result is an absolute URL without dot segments (regression:
+        "mailto:../g").
+        """
+        self.assertEqual(Url("mailto:x@y").join("../g").as_str(), "mailto:g")
+        self.assertEqual(Url("urn:a:b").join(".").as_str(), "urn:")
+        self.assertEqual(Url("myapp:a/b").join("../g").as_str(), "myapp:/g")
+        self.assertEqual(Url("mailto:a@b.c").join("x").as_str(), "mailto:x")
+
+    def test_dot_segment_with_path_params_is_literal(self) -> None:
+        """
+        Test that "..;x" is a segment named ".." with params, not a dot
+        segment (RFC 3986, section 3.3).
+        """
+        self.assertEqual(Url("http://a/b/c/d").join("..;x=1").as_str(), "http://a/b/c/..;x=1")
+        self.assertEqual(
+            Url("http://example.com/a/b/..;x=1").normalize().as_str(),
+            "http://example.com/a/b/..;x=1",
+        )
+
+    def test_result_has_the_class_of_the_base(self) -> None:
+        """
+        Test that the class of the result does not depend on the reference
+        (regression: joining a Url instance returned its class).
+        """
+
+        class MyUrl(Url):
+            pass
+
+        self.assertIs(type(MyUrl("http://h/a").join(Url("http://o/b"))), MyUrl)
+        self.assertIs(type(MyUrl("http://h/a").join("http://o/b")), MyUrl)
+        self.assertIs(type(Url("http://h/a").join(MyUrl("http://o/b"))), Url)
+        self.assertEqual(MyUrl("http://h/a").join(Url("http://o/b")).as_str(), "http://o/b")
+
+    def test_reference_is_not_modified_or_shared(self) -> None:
+        """
+        Test that the result shares nothing with a Url given as reference.
+        """
+        reference = Url("b?x=1")
+        result = Url("http://h/a").join(reference)
+        result.query.add("y", 2)
+        self.assertEqual(reference.as_str(), "b?x=1")
+
+    def test_invalid_reference(self) -> None:
+        """
+        Test that something that is no URL raises (regression:
+        ``join(None)`` returned a copy of the base).
+        """
+        with self.assertRaises(TypeError):
+            Url("http://h/a").join(cast(Any, None))
+        with self.assertRaises(ValueError):
+            Url("http://h/a").join("http://h:port/")
+
+
+class UrlPathParamsSegmentTestCase(unittest.TestCase):
+    """
+    tests that the path params of :py:class:`action0.url.base.Url` stay
+    with the last path segment they belong to
+    """
+
+    def test_parent_drops_path_params(self) -> None:
+        """
+        Test that the params of the removed segment are removed with it
+        (regression: they moved on to the parent segment).
+        """
+        url = Url("http://example.com/a/b;x=1?q=1#f")
+        self.assertEqual(url.parent.as_str(), "http://example.com/a?q=1#f")
+        self.assertEqual(url.as_str(), "http://example.com/a/b;x=1?q=1#f")
+
+    def test_appending_keeps_path_params_on_their_segment(self) -> None:
+        """
+        Test that the params stay where they are when a segment is
+        appended (regression: they moved on to the new last segment).
+        """
+        url = Url("http://example.com/a;p=1") / "b"
+        self.assertEqual(url.as_str(), "http://example.com/a;p=1/b")
+        self.assertEqual(url.path, "/a;p=1/b")
+        self.assertFalse(url.path_params)
+        self.assertEqual(Url(url.as_str()), url)
+
+
+class UrlRobustnessTestCase(unittest.TestCase):
+    """
+    tests for repr(), error messages and copying of
+    :py:class:`action0.url.base.Url`
+    """
+
+    def test_repr_of_subclass_with_own_constructor(self) -> None:
+        """
+        Test that repr() does not depend on the constructor (regression:
+        with a password it went through copy() and raised a TypeError).
+        """
+
+        class TenantUrl(Url):
+            def __init__(self, url: str, tenant: str) -> None:
+                super().__init__(url)
+                self.tenant = tenant
+
+        url = TenantUrl("http://user:secret@example.com/", "acme")
+        self.assertEqual(repr(url), "TenantUrl(http://user:***@example.com/)")
+
+        copied = url.copy(port=8080)
+        self.assertIsInstance(copied, TenantUrl)
+        self.assertEqual(copied.tenant, "acme")
+        self.assertEqual(copied.as_str(), "http://user:secret@example.com:8080/")
+        self.assertIsInstance(url.origin(), TenantUrl)
+        self.assertIsInstance(url / "a", TenantUrl)
+
+    def test_repr_never_raises(self) -> None:
+        """
+        Test that repr() survives whatever a subclass does.
+        """
+
+        class Broken(Url):
+            def _render(self, *, redact_password: bool) -> str:
+                raise RuntimeError("boom")
+
+        self.assertEqual(repr(Broken("http://example.com/")), "Broken(<unrenderable>)")
+
+    def test_password_not_in_error_message(self) -> None:
+        """
+        Test that the errors for an unparsable URL do not quote the
+        password (regression: urllib's message contained the netloc).
+        """
+        for url_str in (
+            "https://user:secret@ho℀st/",
+            "https://user:secret@example.com:port/",
+            "https://user:secret@[::1/",
+            "https://user:secret@exa mple.com/",
+        ):
+            with self.subTest(url=url_str):
+                with self.assertRaises(ValueError) as caught:
+                    Url(url_str)
+                self.assertNotIn("secret", str(caught.exception))
+                # the original error (with the password) is not chained
+                self.assertIsNone(caught.exception.__cause__)
+                self.assertTrue(
+                    caught.exception.__context__ is None or caught.exception.__suppress_context__
+                )
+
+    def test_copy_module(self) -> None:
+        """
+        Test that copy.copy() and copy.deepcopy() give independent Urls
+        (regression: a shallow copy shared the query).
+        """
+        url = Url("http://example.com/?a=1")
+        for copier in (copy.copy, copy.deepcopy):
+            with self.subTest(copier=copier.__name__):
+                copied = copier(url)
+                copied.query.add("b", 2)
+                copied.path_params.add("v", 1)
+                self.assertEqual(url.as_str(), "http://example.com/?a=1")
+                self.assertEqual(copied.as_str(), "http://example.com/;v=1?a=1&b=2")
+
+    def test_deepcopy_of_subclass_attributes(self) -> None:
+        """
+        Test that deepcopy() also copies what a subclass adds.
+        """
+
+        class TaggedUrl(Url):
+            def __init__(self, url: str, tags: list[str]) -> None:
+                super().__init__(url)
+                self.tags = tags
+
+        url = TaggedUrl("http://example.com/", ["a"])
+        self.assertIs(copy.copy(url).tags, url.tags)
+        deep = copy.deepcopy(url)
+        self.assertEqual(deep.tags, ["a"])
+        self.assertIsNot(deep.tags, url.tags)
+
+    def test_pickle(self) -> None:
+        """
+        Test that a Url survives pickling.
+        """
+        url = Url("http://user:pass@example.com:1/a%2Fb;v=1?flag&x=1#f")
+        restored = pickle.loads(pickle.dumps(url))
+        self.assertEqual(restored, url)
+        self.assertEqual(restored.as_str(), url.as_str())
+
+
+class UrlEquivalenceTestCase(unittest.TestCase):
+    """
+    tests that :py:class:`action0.url.base.Url` instances that render the
+    same are equal
+    """
+
+    def test_equal_after_render_and_parse(self) -> None:
+        """
+        Test that a Url equals the Url parsed from its string
+        (regression: IDNA hostnames, hostname case and relative paths
+        behind a host did not).
+        """
+        urls = [
+            Url("http://bücher.example/"),
+            Url(scheme="http", hostname="EXAMPLE.com", path="/"),
+            Url(scheme="https", hostname="example.com", path="index.html"),
+            Url(scheme="https", hostname="::1", port=8443, path="/a b;c", fragment="ä"),
+            Url(scheme="https", hostname="example.com", username="a:b", password="c@d/e"),
+            Url("redis://:secret@localhost:6379/0"),
+            Url("mailto:me@example.com?subject=a+b"),
+            Url("../a/b;v=1?x=1#f"),
+            Url("http://[v1.fe]/"),
+            Url("http://[fe80::1%25eth0]:80/"),
+        ]
+        for url in urls:
+            with self.subTest(url=url):
+                self.assertEqual(Url(url.as_str()), url)
+                self.assertEqual(Url(url.as_str()).as_str(), url.as_str())
+
+    def test_hostname_and_its_idna_form(self) -> None:
+        """
+        Test that a hostname equals its punycode form.
+        """
+        self.assertEqual(Url("http://bücher.example/"), Url("http://xn--bcher-kva.example/"))
+
+    def test_path_param_order_ignored(self) -> None:
+        """
+        Test that, like for the query, the order of path param names
+        doesn't matter.
+        """
+        self.assertEqual(Url("http://h/a;x=1;y=2"), Url("http://h/a;y=2;x=1"))
+        self.assertNotEqual(Url("http://h/a;x=1;x=2"), Url("http://h/a;x=2;x=1"))
+
+
+class UrlSpellingTestCase(unittest.TestCase):
+    """
+    tests for the documented differences between a URL string and what
+    :py:meth:`action0.url.base.Url.as_str` renders for it
+    """
+
+    def test_exact_round_trips(self) -> None:
+        """
+        Test URL forms that have to come back unchanged.
+        """
+        for url_str in (
+            "http:/path",
+            "http:path",
+            "file:///etc/hosts",
+            "file:relative",
+            "http://[v1.fe]/",
+            "mailto:me@example.com",
+            "urn:isbn:0451450523",
+            "tel:+1-816-555-1212",
+            "https://example.com",
+            "https://example.com/",
+            "//example.com",
+        ):
+            with self.subTest(url=url_str):
+                self.assertEqual(Url(url_str).as_str(), url_str)
+
+    def test_normalized_spellings(self) -> None:
+        """
+        Test the things that are normalized: case of scheme and hostname,
+        delimiters without content and the authority of file URLs.
+        """
+        cases = {
+            "HTTP://EXAMPLE.com/A": "http://example.com/A",
+            "https://example.com/?": "https://example.com/",
+            "https://example.com/#": "https://example.com/",
+            "https://user:@example.com/": "https://user@example.com/",
+            "https://@example.com/": "https://example.com/",
+            "file:/etc/hosts": "file:///etc/hosts",
+        }
+        for url_str, expected in cases.items():
+            with self.subTest(url=url_str):
+                self.assertEqual(Url(url_str).as_str(), expected)
+
+    def test_file_url_from_parts(self) -> None:
+        """
+        Test that a file URL built from parts gets its empty authority.
+        """
+        self.assertEqual(Url(scheme="file", path="/etc/hosts").as_str(), "file:///etc/hosts")
+
+    def test_empty_authority_round_trips(self) -> None:
+        """
+        Test that an authority that is present but empty is kept
+        (regression: "sqlite:///data.db" was rendered as "sqlite:/data.db",
+        which is a different URL and nothing a database driver accepts).
+        """
+        for url_str in (
+            "sqlite:///relative.db",
+            "sqlite:////absolute/path.db",
+            "postgresql:///dbname",
+            "unix:///var/run/app.sock",
+            "myapp:///path",
+            "http:///path",
+            "//",
+            "///path",
+            "myapp://",
+        ):
+            with self.subTest(url=url_str):
+                url = Url(url_str)
+                self.assertEqual(url.hostname, "")
+                self.assertEqual(url.as_str(), url_str)
+                self.assertEqual(Url(url.as_str()), url)
+
+    def test_empty_authority_is_not_no_authority(self) -> None:
+        """
+        Test that the hostname "" (empty authority) and None (no
+        authority) are told apart.
+        """
+        self.assertIsNone(Url("sqlite:/data.db").hostname)
+        self.assertEqual(Url("sqlite:/data.db").as_str(), "sqlite:/data.db")
+        self.assertNotEqual(Url("sqlite:///data.db"), Url("sqlite:/data.db"))
+        # file URLs are always rendered with their "//", so these are equal
+        self.assertEqual(Url("file:///etc/hosts"), Url("file:/etc/hosts"))
+        # a netloc with only userinfo is an authority, but has no hostname
+        self.assertIsNone(Url("postgresql://user:pw@/dbname").hostname)
+        self.assertEqual(
+            Url("postgresql://user:pw@/dbname").as_str(), "postgresql://user:pw@/dbname"
+        )
+
+    def test_empty_authority_from_parts(self) -> None:
+        """
+        Test building and removing an empty authority.
+        """
+        url = Url(scheme="sqlite", hostname="", path="/data.db")
+        self.assertEqual(url.as_str(), "sqlite:///data.db")
+        self.assertEqual(Url(scheme="sqlite", authority="", path="/data.db"), url)
+        self.assertEqual(url.authority, "")
+
+        url.hostname = None
+        self.assertEqual(url.as_str(), "sqlite:/data.db")
+        url.authority = ""
+        self.assertEqual(url.as_str(), "sqlite:///data.db")
+        url.authority = None
+        self.assertIsNone(url.hostname)
+
+    def test_empty_authority_reference(self) -> None:
+        """
+        Test that a reference with an empty authority replaces the one of
+        the base URL (RFC 3986, section 5.2.2).
+        """
+        self.assertEqual(Url("http://a/b/c").join("///g").as_str(), "http:///g")
+
+    def test_query_of_other_schemes_is_kept(self) -> None:
+        """
+        Test that the query of a non-web URL is not re-encoded either
+        (connection strings carry paths in it).
+        """
+        url_str = "postgresql://user:pw@/dbname?host=/var/run/postgresql&sslmode=require"
+        url = Url(url_str)
+        self.assertEqual(url.as_str(), url_str)
+        self.assertEqual(url.query["host"], "/var/run/postgresql")
+
+
+class UrlOriginAndNormalizeTestCase(unittest.TestCase):
+    """
+    more tests for :py:meth:`action0.url.base.Url.origin` and
+    :py:meth:`action0.url.base.Url.normalize`
+    """
+
+    def test_origin_without_default_port(self) -> None:
+        """
+        Test that the default port is not part of the origin (regression:
+        "https://example.com:443" and "https://example.com" differed).
+        """
+        self.assertEqual(
+            Url("https://example.com:443/a").origin(), Url("https://example.com/b").origin()
+        )
+        self.assertEqual(Url("https://example.com:443/a").origin().as_str(), "https://example.com")
+        self.assertEqual(Url("https://example.com:8443/a").origin().port, 8443)
+        self.assertNotEqual(
+            Url("http://example.com/").origin(), Url("https://example.com/").origin()
+        )
+
+    def test_normalize_empty_first_segment_stays_relative(self) -> None:
+        """
+        Test the regression that "a/..//b" was normalized to "/b".
+        """
+        url = Url("a/..//b").normalize()
+        self.assertEqual(url.as_str(), ".//b")
+        self.assertEqual(Url(".//b").normalize().as_str(), ".//b")
+
+    def test_normalize_path_is_absolute_behind_any_authority(self) -> None:
+        """
+        Test that the path is made absolute for an authority without a
+        hostname as well (regression: "http://:80/a" became "http:a").
+        """
+        url = Url(scheme="http", port=80, path="a")
+        self.assertEqual(url.as_str(), "http://:80/a")
+        self.assertEqual(url.normalize().as_str(), "http:/a")
+
+    def test_normalize_is_stable(self) -> None:
+        """
+        Test that normalizing what a normalized URL renders as changes
+        nothing (regression: "file:" needed two rounds).
+        """
+        for url_str in (
+            "file:",
+            "file:/a/../b",
+            "http://:80/a",
+            "a/..//b",
+            "./a:b",
+            "//",
+            "x:a/../..",
+        ):
+            with self.subTest(url=url_str):
+                normalized = Url(url_str).normalize().as_str()
+                self.assertEqual(Url(normalized).as_str(), normalized)
+                self.assertEqual(Url(normalized).normalize().as_str(), normalized)
+
+    def test_normalize_adds_root_path_for_any_scheme(self) -> None:
+        """
+        Test that an empty path behind an authority becomes "/" (RFC
+        3986, section 6.2.3), whatever the scheme is.
+        """
+        self.assertEqual(
+            Url("redis://localhost:6379").normalize().as_str(), "redis://localhost:6379/"
+        )
 
 
 if __name__ == "__main__":
