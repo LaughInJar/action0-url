@@ -11,8 +11,9 @@ from action0.url import __version__  # noqa: E402
 project = "action0-url"
 author = "Simon Lachinger"
 project_copyright = "2026, Simon Lachinger"
-version = __version__
-release = __version__
+# shown as "main" on the site, see html_title below
+version = "main"
+release = "main"
 
 extensions = [
     "myst_parser",
@@ -38,4 +39,13 @@ typehints_defaults = "comma"
 myst_enable_extensions = ["colon_fence"]
 
 html_theme = "furo"
-html_title = f"action0-url {__version__}"
+# the site is built from main on every push, so it is not the documentation
+# of a release: say so in the title and on top of every page
+html_title = "action0-url (main)"
+html_theme_options = {
+    "announcement": (
+        "This documentation describes the <code>main</code> branch, which can be "
+        f"ahead of the latest release on PyPI (the version in the sources is {__version__}). "
+        'See the <a href="changelog.html">changelog</a> for what is released.'
+    ),
+}
