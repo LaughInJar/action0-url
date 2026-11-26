@@ -15,8 +15,12 @@ permissions:
 # cannot); the comment behind each one names the release it is. Dependabot
 # (.github/dependabot.yml) keeps both up to date.
 
-# cancel superseded runs of a PR; runs on main are never cancelled, a push
-# must not abort the docs deployment of the one before
+# cancel superseded runs of a PR. Runs on main queue up instead: a running one
+# is never cancelled (a push must not abort the docs deployment of the one
+# before) and the docs are deployed in push order. GitHub keeps only one
+# waiting run per group though, so when several pushes pile up behind a
+# running one, only the newest of them runs - the ones in between are
+# cancelled before they start.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -25,6 +29,11 @@ jobs:
   checks:
     name: checks (python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # every job has a timeout: the default is 6 hours, and a hanging job (the
+    # pre-release python is the likely one - continue-on-error forgives its
+    # failure, not its duration) would hold back the docs deployment and
+    # every later run on main for that long
+    timeout-minutes: 15
     continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
@@ -69,6 +78,7 @@ jobs:
   package:
     name: build and test the package
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -78,6 +88,11 @@ jobs:
       # packaging mistakes should not surface only when a release is tagged
       - name: Build sdist and wheel
         run: uv build
+
+      # the metadata check PyPI's upload action runs too (does the README
+      # render, are the fields valid) - here, long before a tag is pushed
+      - name: Check the package metadata
+        run: uvx twine check dist/*
 
       # tests and doctests against the installed wheel instead of the source
       # tree (--no-project keeps the source tree out of the environment)
@@ -89,6 +104,7 @@ jobs:
   docs:
     name: docs build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -113,6 +129,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [checks, package, docs]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       pages: write
